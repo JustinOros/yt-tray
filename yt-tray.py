@@ -548,7 +548,13 @@ class Controller:
     def toggle(self):
         with self.lock:
             if not self.has_queue():
-                threading.Thread(target=self.ask_search, daemon=True).start()
+                query = (self.data.get("query") or "").strip()
+                if query:
+                    threading.Thread(
+                        target=self.search_and_play, args=(query,), daemon=True
+                    ).start()
+                else:
+                    threading.Thread(target=self.ask_search, daemon=True).start()
                 return
             if self.status == "playing":
                 self.pause()
@@ -1169,8 +1175,54 @@ class App:
         self.ctl.shutdown()
         self.icon.stop()
 
+    def install_mac_click(self):
+        import AppKit
+        import objc
+        from Foundation import NSObject
+
+        app = self
+
+        class ClickHandler(NSObject):
+            def clicked_(self, sender):
+                event = AppKit.NSApp.currentEvent()
+                right = event is not None and (
+                    event.type() == AppKit.NSEventTypeRightMouseUp
+                    or bool(event.modifierFlags() & AppKit.NSEventModifierFlagControl)
+                )
+                if right:
+                    handle = app.icon._menu_handle
+                    if handle:
+                        item = app.icon._status_item
+                        item.setMenu_(handle[0])
+                        item.button().performClick_(None)
+                        item.setMenu_(None)
+                else:
+                    app.on_toggle()
+
+        icon = self.icon
+
+        def update_menu():
+            callbacks = []
+            nsmenu = icon._create_menu(icon.menu, callbacks)
+            icon._menu_handle = (nsmenu, callbacks) if nsmenu else None
+
+        icon._update_menu = update_menu
+        self.click_handler = ClickHandler.alloc().init()
+        button = icon._status_item.button()
+        button.setTarget_(self.click_handler)
+        button.setAction_(objc.selector(None, selector=b"clicked:", signature=b"v@:@"))
+        button.sendActionOn_(
+            AppKit.NSEventMaskLeftMouseUp | AppKit.NSEventMaskRightMouseUp
+        )
+        icon.update_menu()
+
     def run(self):
         def setup(icon):
+            if sys.platform == "darwin":
+                try:
+                    self.install_mac_click()
+                except Exception:
+                    log.exception("mac click handling failed, using default menu click")
             icon.visible = True
             self.refresh()
 
