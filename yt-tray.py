@@ -196,6 +196,7 @@ class Resolved:
         self.duration = duration
         self.user_agent = user_agent
         self.headers = {}
+        self.available_at = 0.0
 
     def stale(self, margin=90):
         return bool(self.expire) and time.time() > self.expire - margin
@@ -231,6 +232,8 @@ def parse_info(info):
         headers.get("User-Agent"),
     )
     res.headers = headers
+    pool = [info] + list(info.get("requested_formats") or [])
+    res.available_at = max(float(f.get("available_at") or 0) for f in pool)
     return res
 
 
@@ -266,6 +269,10 @@ def resolve(video_id):
             continue
         if first is None:
             first = res
+        wait = res.available_at - time.time()
+        if 0 < wait <= 20:
+            log.info("waiting %.1fs for stream to become available", wait)
+            time.sleep(wait + 0.5)
         if probe_stream(res.url, res.headers):
             PREFERRED_CLIENT["value"] = client
             return res
