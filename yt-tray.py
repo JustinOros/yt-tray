@@ -911,7 +911,7 @@ THEMES = (
 ) + ((("auto", "Auto (follows menu bar)"),) if sys.platform == "darwin" else ())
 
 
-def make_icon_image(kind, theme="color"):
+def make_icon_image(kind, theme="color", frame=0):
     from PIL import Image, ImageDraw
 
     size = 256
@@ -936,8 +936,12 @@ def make_icon_image(kind, theme="color"):
         for box in bars:
             d.rounded_rectangle(box, radius=8, fill=ink)
     elif kind == "loading":
-        for x in dots:
-            d.ellipse((x, 128 - dot_size // 2, x + dot_size, 128 + dot_size // 2), fill=ink)
+        for i, x in enumerate(dots):
+            active = i == frame % 3
+            sz = int(dot_size * (1.4 if active else 0.8))
+            cx = x + dot_size // 2
+            col = ink if active else ink[:3] + (110,)
+            d.ellipse((cx - sz // 2, 128 - sz // 2, cx + sz // 2, 128 + sz // 2), fill=col)
     elif kind == "idle" and theme != "color":
         d.polygon(tri, outline=ink, width=18)
     else:
@@ -953,6 +957,7 @@ class App:
         self.store = Store()
         self.dialog_lock = threading.Lock()
         self.images = {}
+        self.frame = 0
         self.player = make_player()
         self.ctl = Controller(
             self.store,
@@ -964,8 +969,9 @@ class App:
         theme = self.store.data.get("theme", "color")
         if theme not in dict(THEMES):
             theme = "color"
-        self.images[(theme, "idle")] = make_icon_image("idle", theme)
-        self.icon = pystray.Icon(APP, self.images[(theme, "idle")], APP, self.build_menu())
+        self.images[(theme, "idle", 0)] = make_icon_image("idle", theme)
+        self.icon = pystray.Icon(APP, self.images[(theme, "idle", 0)], APP, self.build_menu())
+        threading.Thread(target=self.animate, daemon=True).start()
 
     def build_menu(self):
         ps = self.pystray
@@ -1045,19 +1051,36 @@ class App:
     def refresh(self):
         status = self.ctl.status
         kind = status if status in ICON_COLORS else "idle"
-        theme = self.store.data.get("theme", "color")
-        if theme not in dict(THEMES):
-            theme = "color"
-        if (theme, kind) not in self.images:
-            self.images[(theme, kind)] = make_icon_image(kind, theme)
         try:
-            self.icon.icon = self.images[(theme, kind)]
-            if theme == "auto" and sys.platform == "darwin":
-                self.apply_mac_template()
+            self.set_icon(kind, self.frame)
             self.icon.title = self.tooltip()
             self.icon.update_menu()
         except Exception:
             log.exception("icon refresh failed")
+
+    def current_theme(self):
+        theme = self.store.data.get("theme", "color")
+        return theme if theme in dict(THEMES) else "color"
+
+    def set_icon(self, kind, frame=0):
+        theme = self.current_theme()
+        key = (theme, kind, frame if kind == "loading" else 0)
+        if key not in self.images:
+            self.images[key] = make_icon_image(kind, theme, key[2])
+        self.icon.icon = self.images[key]
+        if theme == "auto" and sys.platform == "darwin":
+            self.apply_mac_template()
+
+    def animate(self):
+        while not self.ctl.stop_flag.wait(0.3):
+            if self.ctl.status != "loading":
+                self.frame = 0
+                continue
+            self.frame = (self.frame + 1) % 3
+            try:
+                self.set_icon("loading", self.frame)
+            except Exception:
+                log.exception("animation failed")
 
     def notify(self, message):
         log.info("notify: %s", message)
