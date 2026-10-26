@@ -26,6 +26,7 @@ MAX_RECOVERIES = 4
 MAX_SKIPS = 5
 SEARCH_FILTER_PLAYLISTS = "EgIQAw%3D%3D"
 MAX_PLAYLIST_ITEMS = 500
+PREFETCH_OFFSETS = (1, 2, 3, 4, 5, -1)
 INSTANCE_PORT = 47653
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -489,6 +490,11 @@ class Controller:
         self.last_save = 0.0
         self.last_forced_update = 0.0
         self.resume_from = 0.0
+        self.cache = {}
+        self.cache_lock = threading.Lock()
+        self.failed = {}
+        self.prefetch_event = threading.Event()
+        threading.Thread(target=self._prefetch_loop, daemon=True).start()
         self.thread = threading.Thread(target=self._watchdog, daemon=True)
         self.thread.start()
         threading.Thread(target=self._auto_update, daemon=True).start()
@@ -602,9 +608,13 @@ class Controller:
 
     def _step(self, delta):
         order = self.data["order"]
+        leaving = self.current_entry()
+        if leaving and self.cur is not None:
+            with self.cache_lock:
+                self.cache[leaving["id"]] = self.cur
         self.data["index"] = (self.data["index"] + delta) % len(order)
         self.data["position"] = 0.0
-        self.start_track(self.data["index"], 0.0)
+        self.start_track(self.data["index"], 0.0, True)
 
     def set_shuffle(self, on):
         with self.lock:
@@ -666,7 +676,7 @@ class Controller:
         self.skips = 0
         self.store.save()
 
-    def start_track(self, index, position):
+    def start_track(self, index, position, use_cache=False):
         with self.lock:
             self.gen += 1
             gen = self.gen
@@ -677,16 +687,73 @@ class Controller:
             self.last_pos = position
             self._changed()
         threading.Thread(
-            target=self._load, args=(gen, index, position), daemon=True
+            target=self._load, args=(gen, index, position, use_cache), daemon=True
         ).start()
 
-    def _load(self, gen, index, position):
+    def cache_take(self, video_id):
+        with self.cache_lock:
+            res = self.cache.get(video_id)
+        if res is not None and res.stale(300):
+            with self.cache_lock:
+                self.cache.pop(video_id, None)
+            return None
+        return res
+
+    def _prefetch_loop(self):
+        while not self.stop_flag.is_set():
+            self.prefetch_event.wait(1.0)
+            if self.stop_flag.is_set():
+                return
+            if not self.prefetch_event.is_set():
+                continue
+            self.prefetch_event.clear()
+            try:
+                self._prefetch_pass()
+            except Exception:
+                log.exception("prefetch error")
+
+    def _prefetch_pass(self):
+        with self.lock:
+            order = list(self.data["order"])
+            index = self.data["index"]
+            status = self.status
+        if status not in ("playing", "paused", "loading") or len(order) < 2:
+            return
+        wanted = []
+        for delta in PREFETCH_OFFSETS:
+            vid = order[(index + delta) % len(order)]
+            if vid != order[index % len(order)] and vid not in wanted:
+                wanted.append(vid)
+        with self.cache_lock:
+            for key in list(self.cache):
+                if key not in wanted:
+                    self.cache.pop(key, None)
+        for vid in wanted:
+            if self.stop_flag.is_set() or self.prefetch_event.is_set():
+                return
+            while self.status == "loading" and not self.stop_flag.is_set():
+                time.sleep(0.5)
+            if self.cache_take(vid) is not None:
+                continue
+            if time.time() - self.failed.get(vid, 0) < 600:
+                continue
+            try:
+                res = self.resolver(vid)
+            except Exception as exc:
+                self.failed[vid] = time.time()
+                log.info("prefetch skipped %s: %s", vid, exc)
+                continue
+            with self.cache_lock:
+                self.cache[vid] = res
+            log.info("prefetched %s", vid)
+
+    def _load(self, gen, index, position, use_cache=False):
         entry = self.current_entry()
         if not entry:
             return
-        resolved = None
+        resolved = self.cache_take(entry["id"]) if use_cache else None
         error = None
-        for attempt in range(3):
+        for attempt in range(0 if resolved else 3):
             if gen != self.gen or self.stop_flag.is_set():
                 return
             try:
@@ -735,6 +802,7 @@ class Controller:
             self.resume_from = position
             self.last_dur = resolved.duration
             self._changed()
+            self.prefetch_event.set()
 
     def _give_up_on_track(self, error):
         self.skips += 1
@@ -754,6 +822,10 @@ class Controller:
                 return
             self.recoveries += 1
             log.warning("recovering (%s), attempt %s", reason, self.recoveries)
+            current = self.current_entry()
+            if current:
+                with self.cache_lock:
+                    self.cache.pop(current["id"], None)
             if self.recoveries > MAX_RECOVERIES:
                 self.recoveries = 0
                 self._give_up_on_track(reason)
