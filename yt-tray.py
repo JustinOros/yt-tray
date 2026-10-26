@@ -63,6 +63,7 @@ DEFAULT_STATE = {
     "playlist_id": "",
     "playlist_title": "",
     "shuffle": True,
+    "theme": "color",
     "orig": [],
     "order": [],
     "index": 0,
@@ -903,23 +904,40 @@ ICON_COLORS = {
 }
 
 
-def make_icon_image(kind):
+THEMES = (("color", "Color"), ("light", "Dark glyph (light bar)"), ("dark", "White glyph (dark bar)"))
+
+
+def make_icon_image(kind, theme="color"):
     from PIL import Image, ImageDraw
 
     size = 256
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.ellipse((6, 6, size - 6, size - 6), fill=ICON_COLORS[kind] + (255,))
-    white = (255, 255, 255, 255)
-    if kind == "paused":
-        d.rounded_rectangle((82, 68, 114, 188), radius=8, fill=white)
-        d.rounded_rectangle((142, 68, 174, 188), radius=8, fill=white)
-    elif kind == "loading":
-        for i, x in enumerate((78, 118, 158)):
-            d.ellipse((x, 108, x + 30, 138), fill=white)
+    if theme == "color":
+        d.ellipse((6, 6, size - 6, size - 6), fill=ICON_COLORS[kind] + (255,))
+        ink = (255, 255, 255, 255)
+        soft = (225, 228, 235, 255)
+        tri = [(94, 66), (94, 190), (198, 128)]
+        bars = ((82, 68, 114, 188), (142, 68, 174, 188))
+        dots = (78, 118, 158)
+        dot_size = 30
     else:
-        fill = white if kind == "playing" else (225, 228, 235, 255)
-        d.polygon([(94, 66), (94, 190), (198, 128)], fill=fill)
+        ink = (0, 0, 0, 255) if theme == "light" else (255, 255, 255, 255)
+        soft = ink
+        tri = [(52, 24), (52, 232), (232, 128)]
+        bars = ((44, 28, 100, 228), (156, 28, 212, 228))
+        dots = (24, 100, 176)
+        dot_size = 56
+    if kind == "paused":
+        for box in bars:
+            d.rounded_rectangle(box, radius=8, fill=ink)
+    elif kind == "loading":
+        for x in dots:
+            d.ellipse((x, 128 - dot_size // 2, x + dot_size, 128 + dot_size // 2), fill=ink)
+    elif kind == "idle" and theme != "color":
+        d.polygon(tri, outline=ink, width=18)
+    else:
+        d.polygon(tri, fill=ink if kind == "playing" else soft)
     return img.resize((64, 64), Image.LANCZOS)
 
 
@@ -930,7 +948,7 @@ class App:
         self.pystray = pystray
         self.store = Store()
         self.dialog_lock = threading.Lock()
-        self.images = {k: make_icon_image(k) for k in ICON_COLORS}
+        self.images = {}
         self.player = make_player()
         self.ctl = Controller(
             self.store,
@@ -939,7 +957,11 @@ class App:
             on_notify=self.notify,
             ask_search=self.open_search,
         )
-        self.icon = pystray.Icon(APP, self.images["idle"], APP, self.build_menu())
+        theme = self.store.data.get("theme", "color")
+        if theme not in dict(THEMES):
+            theme = "color"
+        self.images[(theme, "idle")] = make_icon_image("idle", theme)
+        self.icon = pystray.Icon(APP, self.images[(theme, "idle")], APP, self.build_menu())
 
     def build_menu(self):
         ps = self.pystray
@@ -961,9 +983,31 @@ class App:
                 self.on_shuffle,
                 checked=lambda item: self.ctl.shuffle,
             ),
+            ps.MenuItem(
+                "Icon style",
+                ps.Menu(
+                    *[
+                        ps.MenuItem(
+                            label,
+                            self.make_theme_action(key),
+                            checked=lambda item, k=key: self.store.data.get("theme", "color") == k,
+                            radio=True,
+                        )
+                        for key, label in THEMES
+                    ]
+                ),
+            ),
             ps.Menu.SEPARATOR,
             ps.MenuItem("Quit", self.on_quit),
         )
+
+    def make_theme_action(self, key):
+        def action(icon=None, item=None):
+            self.store.data["theme"] = key
+            self.store.save()
+            self.refresh()
+
+        return action
 
     def now_playing_text(self):
         title = self.ctl.now_title()
@@ -980,9 +1024,14 @@ class App:
 
     def refresh(self):
         status = self.ctl.status
-        kind = status if status in self.images else "idle"
+        kind = status if status in ICON_COLORS else "idle"
+        theme = self.store.data.get("theme", "color")
+        if theme not in dict(THEMES):
+            theme = "color"
+        if (theme, kind) not in self.images:
+            self.images[(theme, kind)] = make_icon_image(kind, theme)
         try:
-            self.icon.icon = self.images[kind]
+            self.icon.icon = self.images[(theme, kind)]
             self.icon.title = self.tooltip()
             self.icon.update_menu()
         except Exception:
