@@ -154,6 +154,15 @@ State, log and settings live here:
 
 `state.json` holds the playlist, order, track and position. `yt-tray.log` records errors and recoveries. Set `YT_TRAY_HOME` to use another folder.
 
+## Stop and restart
+
+```
+python3 yt-tray.py --stop
+python3 yt-tray.py --restart
+```
+
+`--stop` quits the running copy. `--restart` quits it if running, then starts a fresh one.
+
 ## Notes
 
 - yt-dlp needs a JavaScript runtime for YouTube. `requirements.txt` installs Deno through pip, and the app puts the venv on the PATH for yt-dlp, so nothing else is required.

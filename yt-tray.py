@@ -1126,14 +1126,65 @@ class App:
         self.icon.run(setup)
 
 
-def single_instance():
+def new_instance_socket():
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if sys.platform != "win32":
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    return sock
+
+
+def single_instance():
+    sock = new_instance_socket()
     try:
         sock.bind(("127.0.0.1", INSTANCE_PORT))
-        sock.listen(1)
+        sock.listen(5)
     except OSError:
         return None
     return sock
+
+
+def control_loop(sock, app):
+    while True:
+        try:
+            conn, _ = sock.accept()
+        except OSError:
+            return
+        try:
+            conn.settimeout(2)
+            data = conn.recv(64).strip()
+            if data == b"quit":
+                conn.sendall(b"ok")
+                conn.close()
+                app.on_quit()
+                return
+        except Exception:
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+
+def stop_running(wait=15.0):
+    try:
+        with socket.create_connection(("127.0.0.1", INSTANCE_PORT), timeout=2) as conn:
+            conn.sendall(b"quit")
+            conn.settimeout(3)
+            conn.recv(8)
+    except OSError:
+        return False
+    end = time.time() + wait
+    while time.time() < end:
+        probe = new_instance_socket()
+        try:
+            probe.bind(("127.0.0.1", INSTANCE_PORT))
+            probe.close()
+            return True
+        except OSError:
+            probe.close()
+            time.sleep(0.2)
+    return True
 
 
 def selftest(query, seconds=8):
@@ -1465,6 +1516,8 @@ def main():
     parser.add_argument("--update", action="store_true")
     parser.add_argument("--version", action="store_true")
     parser.add_argument("--setup", action="store_true")
+    parser.add_argument("--stop", action="store_true")
+    parser.add_argument("--restart", action="store_true")
     parser.add_argument("--install-service", action="store_true")
     parser.add_argument("--remove-service", action="store_true")
     args = parser.parse_args()
@@ -1474,6 +1527,11 @@ def main():
     if args.dialog:
         dialog_main(args.text)
         return 0
+    if args.stop:
+        print("stopped" if stop_running() else "not running")
+        return 0
+    if args.restart:
+        print("stopped old instance" if stop_running() else "no running instance, starting")
     if os.environ.get("YT_TRAY_NO_BOOTSTRAP") != "1":
         bootstrap(args.setup)
     elif args.setup:
@@ -1492,7 +1550,9 @@ def main():
         log.info("already running")
         return 0
     try:
-        App().run()
+        app = App()
+        threading.Thread(target=control_loop, args=(lock, app), daemon=True).start()
+        app.run()
     except Exception:
         log.exception("fatal")
         return 1
