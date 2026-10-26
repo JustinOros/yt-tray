@@ -1208,13 +1208,26 @@ class App:
 
         icon._update_menu = update_menu
         self.click_handler = ClickHandler.alloc().init()
-        button = icon._status_item.button()
-        button.setTarget_(self.click_handler)
-        button.setAction_(objc.selector(None, selector=b"clicked:", signature=b"v@:@"))
-        button.sendActionOn_(
-            AppKit.NSEventMaskLeftMouseUp | AppKit.NSEventMaskRightMouseUp
-        )
-        icon.update_menu()
+
+        def apply():
+            try:
+                item = icon._status_item
+                item.setMenu_(None)
+                button = item.button()
+                button.setTarget_(self.click_handler)
+                button.setAction_(
+                    objc.selector(None, selector=b"clicked:", signature=b"v@:@")
+                )
+                button.sendActionOn_(
+                    AppKit.NSEventMaskLeftMouseUp | AppKit.NSEventMaskRightMouseUp
+                )
+                update_menu()
+            except Exception:
+                log.exception("mac click handling failed")
+
+        from PyObjCTools import AppHelper
+
+        AppHelper.callAfter(apply)
 
     def run(self):
         def setup(icon):
