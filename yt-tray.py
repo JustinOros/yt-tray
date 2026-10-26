@@ -1279,6 +1279,90 @@ def bootstrap(setup_only=False):
         sys.exit(0 if ok else 1)
 
 
+SERVICE_LABEL = "com.justinoros.yt-tray"
+
+
+def service_command():
+    py = venv_python() if venv_python().exists() else Path(sys.executable)
+    if sys.platform == "win32" and py.name.lower() == "python.exe":
+        w = py.with_name("pythonw.exe")
+        if w.exists():
+            py = w
+    return str(py), str(Path(__file__).resolve())
+
+
+def service_install():
+    py, script = service_command()
+    if sys.platform == "win32":
+        import winreg
+
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            0,
+            winreg.KEY_SET_VALUE,
+        )
+        winreg.SetValueEx(key, APP, 0, winreg.REG_SZ, f'"{py}" "{script}"')
+        winreg.CloseKey(key)
+        print("installed: starts at login")
+    elif sys.platform == "darwin":
+        import plistlib
+
+        path = Path.home() / "Library" / "LaunchAgents" / f"{SERVICE_LABEL}.plist"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        plist = {
+            "Label": SERVICE_LABEL,
+            "ProgramArguments": [py, script],
+            "RunAtLoad": True,
+            "EnvironmentVariables": {
+                "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+            },
+        }
+        with open(path, "wb") as f:
+            plistlib.dump(plist, f)
+        uid = str(os.getuid())
+        subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(path)], capture_output=True)
+        run_cmd(["launchctl", "bootstrap", f"gui/{uid}", str(path)])
+        print("installed:", path)
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+        path = base / "autostart" / f"{APP}.desktop"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "[Desktop Entry]\nType=Application\nName=yt-tray\n"
+            f'Exec="{py}" "{script}"\nX-GNOME-Autostart-enabled=true\n',
+            encoding="utf-8",
+        )
+        print("installed:", path)
+    return 0
+
+
+def service_remove():
+    if sys.platform == "win32":
+        import winreg
+
+        try:
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0,
+                winreg.KEY_SET_VALUE,
+            )
+            winreg.DeleteValue(key, APP)
+            winreg.CloseKey(key)
+        except FileNotFoundError:
+            pass
+    elif sys.platform == "darwin":
+        path = Path.home() / "Library" / "LaunchAgents" / f"{SERVICE_LABEL}.plist"
+        subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", str(path)], capture_output=True)
+        path.unlink(missing_ok=True)
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+        (base / "autostart" / f"{APP}.desktop").unlink(missing_ok=True)
+    print("removed")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(prog=APP)
     parser.add_argument("--dialog", action="store_true")
@@ -1287,6 +1371,8 @@ def main():
     parser.add_argument("--update", action="store_true")
     parser.add_argument("--version", action="store_true")
     parser.add_argument("--setup", action="store_true")
+    parser.add_argument("--install-service", action="store_true")
+    parser.add_argument("--remove-service", action="store_true")
     args = parser.parse_args()
     if args.version:
         print(VERSION)
@@ -1298,6 +1384,10 @@ def main():
         bootstrap(args.setup)
     elif args.setup:
         return 0
+    if args.install_service:
+        return service_install()
+    if args.remove_service:
+        return service_remove()
     if args.update:
         return 0 if update_ytdlp() else 1
     if args.selftest:

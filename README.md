@@ -84,6 +84,15 @@ This searches for a playlist, resolves the first track, plays it silently for a 
 
 ## Start at login
 
+The easy way, on any OS:
+
+```
+python3 yt-tray.py --install-service
+python3 yt-tray.py --remove-service
+```
+
+Install registers a login item (Windows Run key, macOS LaunchAgent, Linux autostart entry). Remove undoes it. Do not move the folder afterward. The manual steps below do the same thing.
+
 Run these from inside the repo folder after installing.
 
 ### Windows (Command Prompt)
