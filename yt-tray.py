@@ -63,7 +63,7 @@ DEFAULT_STATE = {
     "playlist_id": "",
     "playlist_title": "",
     "shuffle": True,
-    "theme": "color",
+    "theme": "auto",
     "orig": [],
     "order": [],
     "index": 0,
@@ -905,10 +905,51 @@ ICON_COLORS = {
 
 
 THEMES = (
+    ("auto", "Auto (follow system)"),
     ("color", "Color"),
-    ("light", "Black icon (for light menu bar)"),
-    ("dark", "White icon (for dark menu bar)"),
-) + ((("auto", "Auto (follows menu bar)"),) if sys.platform == "darwin" else ())
+    ("light", "Black icon (for light bar)"),
+    ("dark", "White icon (for dark bar)"),
+)
+
+
+def detect_system_dark():
+    try:
+        if sys.platform == "win32":
+            import winreg
+
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            )
+            value, _ = winreg.QueryValueEx(key, "SystemUsesLightTheme")
+            winreg.CloseKey(key)
+            return value == 0
+        if sys.platform == "darwin":
+            out = subprocess.run(
+                ["defaults", "read", "-g", "AppleInterfaceStyle"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            return out.stdout.strip().lower() == "dark"
+        for key in ("color-scheme", "gtk-theme"):
+            out = subprocess.run(
+                ["gsettings", "get", "org.gnome.desktop.interface", key],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            text = out.stdout.strip().lower()
+            if out.returncode == 0 and text:
+                if "dark" in text:
+                    return True
+                if key == "color-scheme" and ("light" in text or "default" in text):
+                    continue
+                if key == "gtk-theme":
+                    return False
+    except Exception:
+        pass
+    return True
 
 
 def make_icon_image(kind, theme="color", frame=0):
@@ -926,7 +967,7 @@ def make_icon_image(kind, theme="color", frame=0):
         dots = (78, 118, 158)
         dot_size = 30
     else:
-        ink = (0, 0, 0, 255) if theme in ("light", "auto") else (255, 255, 255, 255)
+        ink = (0, 0, 0, 255) if theme == "light" else (255, 255, 255, 255)
         soft = ink
         tri = [(52, 24), (52, 232), (232, 128)]
         bars = ((44, 28, 100, 228), (156, 28, 212, 228))
@@ -958,6 +999,7 @@ class App:
         self.dialog_lock = threading.Lock()
         self.images = {}
         self.frame = 0
+        self.system_dark = detect_system_dark()
         self.player = make_player()
         self.ctl = Controller(
             self.store,
@@ -966,9 +1008,7 @@ class App:
             on_notify=self.notify,
             ask_search=self.open_search,
         )
-        theme = self.store.data.get("theme", "color")
-        if theme not in dict(THEMES):
-            theme = "color"
+        theme = self.effective_theme()
         self.images[(theme, "idle", 0)] = make_icon_image("idle", theme)
         self.icon = pystray.Icon(APP, self.images[(theme, "idle", 0)], APP, self.build_menu())
         threading.Thread(target=self.animate, daemon=True).start()
@@ -1000,7 +1040,7 @@ class App:
                         ps.MenuItem(
                             label,
                             self.make_theme_action(key),
-                            checked=lambda item, k=key: self.store.data.get("theme", "color") == k,
+                            checked=lambda item, k=key: self.current_theme() == k,
                             radio=True,
                         )
                         for key, label in THEMES
@@ -1011,25 +1051,11 @@ class App:
             ps.MenuItem("Quit", self.on_quit),
         )
 
-    def apply_mac_template(self):
-        def work():
-            try:
-                image = self.icon._status_item.button().image()
-                if image is not None:
-                    image.setTemplate_(True)
-            except Exception:
-                log.exception("template icon failed")
-
-        try:
-            from PyObjCTools import AppHelper
-
-            AppHelper.callAfter(work)
-        except Exception:
-            log.exception("template icon failed")
-
     def make_theme_action(self, key):
         def action(icon=None, item=None):
             self.store.data["theme"] = key
+            if key == "auto":
+                self.system_dark = detect_system_dark()
             self.store.save()
             self.refresh()
 
@@ -1059,20 +1085,38 @@ class App:
             log.exception("icon refresh failed")
 
     def current_theme(self):
-        theme = self.store.data.get("theme", "color")
-        return theme if theme in dict(THEMES) else "color"
+        theme = self.store.data.get("theme", "auto")
+        return theme if theme in dict(THEMES) else "auto"
+
+    def effective_theme(self):
+        theme = self.current_theme()
+        if theme == "auto":
+            return "dark" if self.system_dark else "light"
+        return theme
+
+    def current_kind(self):
+        status = self.ctl.status
+        return status if status in ICON_COLORS else "idle"
 
     def set_icon(self, kind, frame=0):
-        theme = self.current_theme()
+        theme = self.effective_theme()
         key = (theme, kind, frame if kind == "loading" else 0)
         if key not in self.images:
             self.images[key] = make_icon_image(kind, theme, key[2])
         self.icon.icon = self.images[key]
-        if theme == "auto" and sys.platform == "darwin":
-            self.apply_mac_template()
 
     def animate(self):
+        ticks = 0
         while not self.ctl.stop_flag.wait(0.3):
+            ticks += 1
+            if ticks % 10 == 0 and self.current_theme() == "auto":
+                dark = detect_system_dark()
+                if dark != self.system_dark:
+                    self.system_dark = dark
+                    try:
+                        self.set_icon(self.current_kind(), self.frame)
+                    except Exception:
+                        log.exception("theme switch failed")
             if self.ctl.status != "loading":
                 self.frame = 0
                 continue
