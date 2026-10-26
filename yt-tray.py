@@ -904,7 +904,11 @@ ICON_COLORS = {
 }
 
 
-THEMES = (("color", "Color"), ("light", "Dark glyph (light bar)"), ("dark", "White glyph (dark bar)"))
+THEMES = (
+    ("color", "Color"),
+    ("light", "Black icon (for light menu bar)"),
+    ("dark", "White icon (for dark menu bar)"),
+) + ((("auto", "Auto (follows menu bar)"),) if sys.platform == "darwin" else ())
 
 
 def make_icon_image(kind, theme="color"):
@@ -922,7 +926,7 @@ def make_icon_image(kind, theme="color"):
         dots = (78, 118, 158)
         dot_size = 30
     else:
-        ink = (0, 0, 0, 255) if theme == "light" else (255, 255, 255, 255)
+        ink = (0, 0, 0, 255) if theme in ("light", "auto") else (255, 255, 255, 255)
         soft = ink
         tri = [(52, 24), (52, 232), (232, 128)]
         bars = ((44, 28, 100, 228), (156, 28, 212, 228))
@@ -1001,6 +1005,22 @@ class App:
             ps.MenuItem("Quit", self.on_quit),
         )
 
+    def apply_mac_template(self):
+        def work():
+            try:
+                image = self.icon._status_item.button().image()
+                if image is not None:
+                    image.setTemplate_(True)
+            except Exception:
+                log.exception("template icon failed")
+
+        try:
+            from PyObjCTools import AppHelper
+
+            AppHelper.callAfter(work)
+        except Exception:
+            log.exception("template icon failed")
+
     def make_theme_action(self, key):
         def action(icon=None, item=None):
             self.store.data["theme"] = key
@@ -1032,6 +1052,8 @@ class App:
             self.images[(theme, kind)] = make_icon_image(kind, theme)
         try:
             self.icon.icon = self.images[(theme, kind)]
+            if theme == "auto" and sys.platform == "darwin":
+                self.apply_mac_template()
             self.icon.title = self.tooltip()
             self.icon.update_menu()
         except Exception:
