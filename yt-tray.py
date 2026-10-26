@@ -65,6 +65,7 @@ DEFAULT_STATE = {
     "playlist_title": "",
     "shuffle": True,
     "theme": "auto",
+    "notifications": True,
     "orig": [],
     "order": [],
     "index": 0,
@@ -464,6 +465,7 @@ class Controller:
         on_change=None,
         on_notify=None,
         ask_search=None,
+        on_track=None,
     ):
         self.store = store
         self.player = player
@@ -473,6 +475,8 @@ class Controller:
         self.on_change = on_change or (lambda: None)
         self.on_notify = on_notify or (lambda msg: None)
         self.ask_search = ask_search or (lambda: None)
+        self.on_track = on_track or (lambda video_id, title: None)
+        self.last_announced = None
         self.lock = threading.RLock()
         self.status = "idle"
         self.gen = 0
@@ -803,6 +807,12 @@ class Controller:
             self.last_dur = resolved.duration
             self._changed()
             self.prefetch_event.set()
+            if entry["id"] != self.last_announced:
+                self.last_announced = entry["id"]
+                try:
+                    self.on_track(entry["id"], self.title or entry["title"])
+                except Exception:
+                    log.exception("track announcement failed")
 
     def _give_up_on_track(self, error):
         self.skips += 1
@@ -960,6 +970,71 @@ def dialog_main(initial):
     sys.stdout.flush()
 
 
+def popup_main(title, thumb_url, seconds):
+    import base64
+    import io
+    import tkinter as tk
+
+    if sys.platform == "darwin":
+        try:
+            import AppKit
+
+            AppKit.NSApplication.sharedApplication().setActivationPolicy_(
+                AppKit.NSApplicationActivationPolicyAccessory
+            )
+        except Exception:
+            pass
+    png = None
+    try:
+        from PIL import Image
+
+        req = urllib.request.Request(thumb_url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = resp.read()
+        img = Image.open(io.BytesIO(data)).convert("RGB").resize((128, 72), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, "PNG")
+        png = base64.b64encode(buf.getvalue())
+    except Exception:
+        png = None
+    width, height = 372, 96
+    bg, fg, dim = "#202124", "#f1f3f4", "#9aa0a6"
+    root = tk.Tk()
+    root.withdraw()
+    root.overrideredirect(True)
+    root.attributes("-topmost", True)
+    root.configure(bg=bg)
+    frame = tk.Frame(root, bg=bg, highlightthickness=1, highlightbackground="#3c4043")
+    frame.pack(fill="both", expand=True)
+    if png:
+        photo = tk.PhotoImage(data=png)
+        tk.Label(frame, image=photo, bg=bg, bd=0).pack(side="left", padx=(12, 10), pady=12)
+        frame.photo = photo
+    text = tk.Frame(frame, bg=bg)
+    text.pack(side="left", fill="both", expand=True, padx=(0, 12), pady=10)
+    tk.Label(text, text="Now playing", bg=bg, fg=dim, font=("TkDefaultFont", 9), anchor="w").pack(fill="x")
+    tk.Label(
+        text,
+        text=title if len(title) <= 66 else title[:63] + "...",
+        bg=bg,
+        fg=fg,
+        font=("TkDefaultFont", 11, "bold"),
+        anchor="nw",
+        justify="left",
+        wraplength=210 if png else 330,
+    ).pack(fill="both", expand=True)
+    root.update_idletasks()
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    x = sw - width - 20
+    y = 40 if sys.platform == "darwin" else sh - height - 70
+    root.geometry(f"{width}x{height}+{x}+{y}")
+    root.deiconify()
+    root.bind("<Button-1>", lambda e: root.destroy())
+    frame.bind("<Button-1>", lambda e: root.destroy())
+    root.after(int(seconds * 1000), root.destroy)
+    root.mainloop()
+
+
 def ask_query(initial=""):
     cmd = [sys.executable, str(Path(__file__).resolve()), "--dialog", "--text", initial]
     try:
@@ -1092,7 +1167,9 @@ class App:
             on_change=self.refresh,
             on_notify=self.notify,
             ask_search=self.open_search,
+            on_track=self.show_popup,
         )
+        self.popup_proc = None
         theme = self.effective_theme()
         self.images[(theme, "idle", 0)] = make_icon_image("idle", theme)
         self.icon = pystray.Icon(APP, self.images[(theme, "idle", 0)], APP, self.build_menu())
@@ -1119,6 +1196,23 @@ class App:
                 checked=lambda item: self.ctl.shuffle,
             ),
             ps.MenuItem(
+                "Notifications",
+                ps.Menu(
+                    ps.MenuItem(
+                        "On",
+                        self.make_notify_action(True),
+                        checked=lambda item: bool(self.store.data.get("notifications", True)),
+                        radio=True,
+                    ),
+                    ps.MenuItem(
+                        "Off",
+                        self.make_notify_action(False),
+                        checked=lambda item: not self.store.data.get("notifications", True),
+                        radio=True,
+                    ),
+                ),
+            ),
+            ps.MenuItem(
                 "Icon style",
                 ps.Menu(
                     *[
@@ -1135,6 +1229,35 @@ class App:
             ps.Menu.SEPARATOR,
             ps.MenuItem("Quit", self.on_quit),
         )
+
+    def show_popup(self, video_id, title):
+        if not self.store.data.get("notifications", True):
+            return
+        if self.popup_proc is not None and self.popup_proc.poll() is None:
+            self.popup_proc.terminate()
+        cmd = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--popup",
+            f"--text={title}",
+            f"--thumb-url=https://i.ytimg.com/vi/{video_id}/mqdefault.jpg",
+        ]
+        try:
+            self.popup_proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **subprocess_flags(),
+            )
+        except Exception:
+            log.exception("popup failed")
+
+    def make_notify_action(self, on):
+        def action(icon=None, item=None):
+            self.store.data["notifications"] = on
+            self.store.save()
+
+        return action
 
     def make_theme_action(self, key):
         def action(icon=None, item=None):
@@ -1700,6 +1823,9 @@ def main():
     parser = argparse.ArgumentParser(prog=APP)
     parser.add_argument("--dialog", action="store_true")
     parser.add_argument("--text", default="")
+    parser.add_argument("--popup", action="store_true")
+    parser.add_argument("--thumb-url", default="")
+    parser.add_argument("--seconds", type=float, default=4.0)
     parser.add_argument("--selftest", metavar="QUERY")
     parser.add_argument("--update", action="store_true")
     parser.add_argument("--version", action="store_true")
@@ -1714,6 +1840,9 @@ def main():
         return 0
     if args.dialog:
         dialog_main(args.text)
+        return 0
+    if args.popup:
+        popup_main(args.text, args.thumb_url, args.seconds)
         return 0
     if args.stop:
         print("stopped" if stop_running() else "not running")
