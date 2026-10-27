@@ -1535,6 +1535,8 @@ class SniIcon:
         if name == "ItemIsMenu":
             return GLib.Variant("b", False)
         if name == "Menu":
+            if os.environ.get("YT_TRAY_NO_DBUSMENU"):
+                return GLib.Variant("o", "/")
             return GLib.Variant("o", MENU_PATH)
         return None
 
