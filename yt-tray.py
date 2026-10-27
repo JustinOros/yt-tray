@@ -1059,14 +1059,36 @@ class Controller:
 def dialog_main(initial, prompt="Search YouTube playlists:", button="Play"):
     import tkinter as tk
 
+    dark = False
+    try:
+        dark = detect_system_dark()
+    except Exception:
+        dark = False
+    bg, fg, field, btn, sel = "#202020", "#f0f0f0", "#2d2d2d", "#3a3a3a", "#0a64ad"
     result = {"value": ""}
     root = tk.Tk()
     root.title("yt-tray")
     root.resizable(False, False)
-    tk.Label(root, text=prompt).pack(padx=14, pady=(14, 4), anchor="w")
+    if dark:
+        root.configure(bg=bg)
+    label = tk.Label(root, text=prompt)
     var = tk.StringVar(value=initial)
     entry = tk.Entry(root, textvariable=var, width=44)
-    entry.pack(padx=14, pady=4)
+    if dark:
+        label.configure(bg=bg, fg=fg)
+        entry.configure(
+            bg=field,
+            fg=fg,
+            insertbackground=fg,
+            selectbackground=sel,
+            selectforeground="#ffffff",
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground="#555555",
+            highlightcolor=sel,
+        )
+    label.pack(padx=14, pady=(14, 4), anchor="w")
+    entry.pack(padx=14, pady=4, ipady=2)
     entry.select_range(0, "end")
 
     def accept(_event=None):
@@ -1077,12 +1099,39 @@ def dialog_main(initial, prompt="Search YouTube playlists:", button="Play"):
         root.destroy()
 
     row = tk.Frame(root)
+    if dark:
+        row.configure(bg=bg)
     row.pack(padx=14, pady=(8, 14), anchor="e")
-    tk.Button(row, text="Cancel", width=8, command=cancel).pack(side="left", padx=4)
-    tk.Button(row, text=button, width=8, command=accept).pack(side="left")
+    cancel_btn = tk.Button(row, text="Cancel", width=8, command=cancel)
+    ok_btn = tk.Button(row, text=button, width=8, command=accept)
+    if dark:
+        for b in (cancel_btn, ok_btn):
+            b.configure(
+                bg=btn,
+                fg=fg,
+                activebackground="#4a4a4a",
+                activeforeground=fg,
+                relief="flat",
+                borderwidth=0,
+                highlightthickness=0,
+            )
+    cancel_btn.pack(side="left", padx=4)
+    ok_btn.pack(side="left")
     root.bind("<Return>", accept)
     root.bind("<Escape>", cancel)
     root.update_idletasks()
+    if dark and sys.platform == "win32":
+        try:
+            import ctypes
+
+            hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+            value = ctypes.c_int(1)
+            for attr in (20, 19):
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, attr, ctypes.byref(value), ctypes.sizeof(value)
+                )
+        except Exception:
+            pass
     w, h = root.winfo_reqwidth(), root.winfo_reqheight()
     x = (root.winfo_screenwidth() - w) // 2
     y = (root.winfo_screenheight() - h) // 3
