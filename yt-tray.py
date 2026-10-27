@@ -66,6 +66,7 @@ DEFAULT_STATE = {
     "shuffle": True,
     "theme": "auto",
     "notifications": True,
+    "spotify": [],
     "orig": [],
     "order": [],
     "index": 0,
@@ -398,6 +399,84 @@ def search_playlist(query):
     raise YtdlpError(str(last_error) if last_error else "no results")
 
 
+def spotify_playlist_id(text):
+    match = re.search(r"playlist[/:]([A-Za-z0-9]{22})", text or "")
+    return match.group(1) if match else None
+
+
+def parse_spotify_embed(html):
+    match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.S)
+    if not match:
+        raise YtdlpError("Spotify page format not recognized")
+    data = json.loads(match.group(1))
+    containers = []
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            if isinstance(obj.get("trackList"), list):
+                containers.append(obj)
+            for value in obj.values():
+                walk(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                walk(value)
+
+    walk(data)
+    if not containers:
+        raise YtdlpError("playlist is private or unavailable")
+    box = containers[0]
+    name = box.get("name") or box.get("title")
+    if not name:
+        og = re.search(r'<meta property="og:title" content="([^"]+)"', html)
+        name = og.group(1) if og else "Spotify playlist"
+    entries = []
+    seen = set()
+    for track in box["trackList"]:
+        uri = track.get("uri") or ""
+        tid = uri.split(":")[-1]
+        title = (track.get("title") or "").strip()
+        artist = (track.get("subtitle") or "").replace("\xa0", " ").strip()
+        if not tid or not title or tid in seen:
+            continue
+        seen.add(tid)
+        label = f"{artist} - {title}" if artist else title
+        duration = (track.get("duration") or 0) / 1000.0
+        entries.append(
+            {"id": "sp:" + tid, "title": label, "q": label, "dur": duration}
+        )
+    if not entries:
+        raise YtdlpError("playlist has no tracks")
+    return name, entries
+
+
+def fetch_spotify_playlist(pid):
+    req = urllib.request.Request(
+        f"https://open.spotify.com/embed/playlist/{pid}",
+        headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            html = resp.read().decode("utf-8", "replace")
+    except Exception as exc:
+        raise YtdlpError(f"could not reach Spotify: {exc}")
+    return parse_spotify_embed(html)
+
+
+def find_youtube_for(query, duration=None):
+    data = ytdlp_json(["--flat-playlist", "-J", f"ytsearch5:{query} audio"])
+    found = [
+        e for e in data.get("entries") or [] if e.get("id") and len(e["id"]) == 11
+    ]
+    if not found:
+        raise YtdlpError("no YouTube match")
+    if duration:
+        for e in found:
+            length = e.get("duration")
+            if length and abs(length - duration) <= 12:
+                return e["id"]
+    return found[0]["id"]
+
+
 def prepare_libmpv():
     import ctypes.util
 
@@ -466,6 +545,8 @@ class Controller:
         on_notify=None,
         ask_search=None,
         on_track=None,
+        finder=None,
+        spotify_loader=None,
     ):
         self.store = store
         self.player = player
@@ -477,6 +558,8 @@ class Controller:
         self.ask_search = ask_search or (lambda: None)
         self.on_track = on_track or (lambda video_id, title: None)
         self.last_announced = None
+        self.finder = finder or find_youtube_for
+        self.spotify_loader = spotify_loader or fetch_spotify_playlist
         self.lock = threading.RLock()
         self.status = "idle"
         self.gen = 0
@@ -559,7 +642,13 @@ class Controller:
         with self.lock:
             if not self.has_queue():
                 query = (self.data.get("query") or "").strip()
-                if query:
+                if query.startswith("spotify:"):
+                    threading.Thread(
+                        target=self.play_spotify,
+                        args=(query[8:], self.data.get("playlist_title") or ""),
+                        daemon=True,
+                    ).start()
+                elif query:
                     threading.Thread(
                         target=self.search_and_play, args=(query,), daemon=True
                     ).start()
@@ -635,6 +724,38 @@ class Controller:
                     self.data["index"] = self.data["order"].index(entry["id"])
             self.store.save()
             self._changed()
+
+    def play_spotify(self, pid, name=""):
+        with self.lock:
+            self.gen += 1
+            gen = self.gen
+            self.status = "loading"
+            self.title = f"Loading: {name or 'Spotify playlist'}"
+            self._changed()
+        try:
+            title, entries = self.spotify_loader(pid)
+        except Exception as exc:
+            log.warning("spotify load failed: %s", exc)
+            with self.lock:
+                if gen != self.gen:
+                    return
+                self.title = ""
+                self.status = "paused" if self.cur is not None else "idle"
+                self._changed()
+            self.on_notify(f"Spotify playlist failed: {exc}")
+            return
+        with self.lock:
+            if gen != self.gen:
+                return
+            self.set_queue(f"spotify:{pid}", pid, title, entries)
+            self.start_track(0, 0.0)
+
+    def resolve_entry(self, entry):
+        video_id = entry.get("yt")
+        if not video_id and entry.get("q"):
+            video_id = self.finder(entry["q"], entry.get("dur"))
+            entry["yt"] = video_id
+        return self.resolver(video_id or entry["id"])
 
     def search_and_play(self, query):
         query = (query or "").strip()
@@ -742,7 +863,8 @@ class Controller:
             if time.time() - self.failed.get(vid, 0) < 600:
                 continue
             try:
-                res = self.resolver(vid)
+                found = self.entry_for(vid)
+                res = self.resolve_entry(found) if found else self.resolver(vid)
             except Exception as exc:
                 self.failed[vid] = time.time()
                 log.info("prefetch skipped %s: %s", vid, exc)
@@ -761,7 +883,7 @@ class Controller:
             if gen != self.gen or self.stop_flag.is_set():
                 return
             try:
-                resolved = self.resolver(entry["id"])
+                resolved = self.resolve_entry(entry)
                 break
             except Exception as exc:
                 error = exc
@@ -776,7 +898,7 @@ class Controller:
                 self._give_up_on_track(error)
                 return
             self.cur = resolved
-            if resolved.title:
+            if resolved.title and not entry.get("q"):
                 self.title = resolved.title
             try:
                 self.player.pause = False
@@ -810,7 +932,9 @@ class Controller:
             if entry["id"] != self.last_announced:
                 self.last_announced = entry["id"]
                 try:
-                    self.on_track(entry["id"], self.title or entry["title"])
+                    self.on_track(
+                        entry.get("yt") or entry["id"], self.title or entry["title"]
+                    )
                 except Exception:
                     log.exception("track announcement failed")
 
@@ -932,14 +1056,14 @@ class Controller:
                 pass
 
 
-def dialog_main(initial):
+def dialog_main(initial, prompt="Search YouTube playlists:", button="Play"):
     import tkinter as tk
 
     result = {"value": ""}
     root = tk.Tk()
     root.title("yt-tray")
     root.resizable(False, False)
-    tk.Label(root, text="Search YouTube playlists:").pack(padx=14, pady=(14, 4), anchor="w")
+    tk.Label(root, text=prompt).pack(padx=14, pady=(14, 4), anchor="w")
     var = tk.StringVar(value=initial)
     entry = tk.Entry(root, textvariable=var, width=44)
     entry.pack(padx=14, pady=4)
@@ -955,7 +1079,7 @@ def dialog_main(initial):
     row = tk.Frame(root)
     row.pack(padx=14, pady=(8, 14), anchor="e")
     tk.Button(row, text="Cancel", width=8, command=cancel).pack(side="left", padx=4)
-    tk.Button(row, text="Play", width=8, command=accept).pack(side="left")
+    tk.Button(row, text=button, width=8, command=accept).pack(side="left")
     root.bind("<Return>", accept)
     root.bind("<Escape>", cancel)
     root.update_idletasks()
@@ -1107,11 +1231,11 @@ def popup_main(title, thumb_url, seconds):
     root.mainloop()
 
 
-def ask_query_mac(initial):
+def ask_query_mac(initial, prompt, button):
     script = (
-        'text returned of (display dialog "Search YouTube playlists:" '
+        f"text returned of (display dialog {json.dumps(prompt)} "
         f"default answer {json.dumps(initial)} with title \"yt-tray\" "
-        'buttons {"Cancel", "Play"} default button "Play")'
+        f"buttons {{\"Cancel\", {json.dumps(button)}}} default button {json.dumps(button)})"
     )
     try:
         proc = subprocess.run(
@@ -1125,10 +1249,17 @@ def ask_query_mac(initial):
     return proc.stdout.strip()
 
 
-def ask_query(initial=""):
+def ask_query(initial="", prompt="Search YouTube playlists:", button="Play"):
     if sys.platform == "darwin":
-        return ask_query_mac(initial)
-    cmd = [sys.executable, str(Path(__file__).resolve()), "--dialog", "--text", initial]
+        return ask_query_mac(initial, prompt, button)
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--dialog",
+        f"--text={initial}",
+        f"--prompt={prompt}",
+        f"--button={button}",
+    ]
     try:
         proc = subprocess.run(
             cmd,
@@ -1276,6 +1407,7 @@ class App:
                 default=True,
             ),
             ps.MenuItem("Search...", self.on_search),
+            ps.MenuItem("Spotify", ps.Menu(self.spotify_items)),
             ps.MenuItem("Next", self.on_next),
             ps.MenuItem("Previous", self.on_previous),
             ps.Menu.SEPARATOR,
@@ -1321,6 +1453,79 @@ class App:
             ps.Menu.SEPARATOR,
             ps.MenuItem("Quit", self.on_quit),
         )
+
+    def spotify_items(self):
+        ps = self.pystray
+        yield ps.MenuItem("Load Playlist", self.on_spotify_add)
+        lists = self.store.data.get("spotify") or []
+        yield ps.Menu.SEPARATOR
+        if not lists:
+            yield ps.MenuItem("No playlists yet", lambda icon, item: None, enabled=False)
+            return
+        for entry in lists:
+            yield ps.MenuItem(
+                self.menu_label(entry["name"]), self.make_spotify_play(entry["id"], entry["name"])
+            )
+        yield ps.Menu.SEPARATOR
+        yield ps.MenuItem(
+            "Remove",
+            ps.Menu(
+                lambda: (
+                    ps.MenuItem(self.menu_label(e["name"]), self.make_spotify_remove(e["id"]))
+                    for e in list(self.store.data.get("spotify") or [])
+                )
+            ),
+        )
+
+    def menu_label(self, text):
+        text = text.replace("&", "&&")
+        return text if len(text) <= 48 else text[:45] + "..."
+
+    def make_spotify_play(self, pid, name):
+        def action(icon=None, item=None):
+            threading.Thread(
+                target=self.ctl.play_spotify, args=(pid, name), daemon=True
+            ).start()
+
+        return action
+
+    def make_spotify_remove(self, pid):
+        def action(icon=None, item=None):
+            self.store.data["spotify"] = [
+                e for e in self.store.data.get("spotify", []) if e["id"] != pid
+            ]
+            self.store.save()
+            self.refresh()
+
+        return action
+
+    def on_spotify_add(self, icon=None, item=None):
+        threading.Thread(target=self.add_spotify, daemon=True).start()
+
+    def add_spotify(self):
+        if not self.dialog_lock.acquire(blocking=False):
+            return
+        try:
+            text = ask_query("", "Spotify playlist URL:", "Load")
+        finally:
+            self.dialog_lock.release()
+        if not text:
+            return
+        pid = spotify_playlist_id(text)
+        if not pid:
+            self.notify("That does not look like a Spotify playlist URL")
+            return
+        try:
+            name, entries = fetch_spotify_playlist(pid)
+        except Exception as exc:
+            self.notify(f"Could not add playlist: {exc}")
+            return
+        lists = [e for e in self.store.data.get("spotify", []) if e["id"] != pid]
+        lists.append({"id": pid, "name": name})
+        self.store.data["spotify"] = lists
+        self.store.save()
+        self.refresh()
+        self.notify(f"Added {name} ({len(entries)} tracks)")
 
     def show_popup(self, video_id, title):
         if not self.store.data.get("notifications", True):
@@ -1916,6 +2121,8 @@ def main():
     parser.add_argument("--dialog", action="store_true")
     parser.add_argument("--text", default="")
     parser.add_argument("--popup", action="store_true")
+    parser.add_argument("--prompt", default="Search YouTube playlists:")
+    parser.add_argument("--button", default="Play")
     parser.add_argument("--thumb-url", default="")
     parser.add_argument("--seconds", type=float, default=4.0)
     parser.add_argument("--selftest", metavar="QUERY")
@@ -1931,7 +2138,7 @@ def main():
         print(VERSION)
         return 0
     if args.dialog:
-        dialog_main(args.text)
+        dialog_main(args.text, args.prompt, args.button)
         return 0
     if args.popup:
         popup_main(args.text, args.thumb_url, args.seconds)

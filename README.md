@@ -14,6 +14,10 @@ yt-dlp resolves the raw audio stream and mpv plays it, so no ad is ever requeste
 - Remembers the last playlist, track and position between launches
 - Updates yt-dlp automatically (at most once a day, and immediately after repeated failures)
 
+## Spotify playlists
+
+Open the Spotify menu, choose Load Playlist, and paste a public playlist link, for example https://open.spotify.com/playlist/6ZYVuIwQDiHbKIWf0LHTbz. Loaded playlists appear in the menu and can be removed from the Remove submenu. Nothing plays from Spotify: tracks are read from the playlist's public page and each one is matched to a YouTube video by artist, title and length, then played and prefetched like any other playlist. Spotify only exposes the first 100 tracks of a playlist this way, and private playlists cannot be loaded.
+
 ## Quick start
 
 ```
