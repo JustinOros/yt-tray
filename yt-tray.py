@@ -2487,6 +2487,42 @@ def ensure_gnome_tray():
     say("log out and back in once, then the tray icon will appear")
 
 
+def extract_7z(archive, out):
+    import shutil
+
+    attempts = []
+    tar = shutil.which("tar")
+    if tar:
+        attempts.append([tar, "-xf", str(archive), "-C", str(out)])
+    for exe in ("7z", "7za", "7zz"):
+        found = shutil.which(exe)
+        if found:
+            attempts.append([found, "x", "-y", f"-o{out}", str(archive)])
+    for exe in (
+        r"C:\Program Files\7-Zip\7z.exe",
+        r"C:\Program Files (x86)\7-Zip\7z.exe",
+    ):
+        if os.path.exists(exe):
+            attempts.append([exe, "x", "-y", f"-o{out}", str(archive)])
+    for cmd in attempts:
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=300)
+        except Exception:
+            continue
+        if result.returncode == 0 and any(out.rglob("*.dll")):
+            return True
+    try:
+        pip = [str(venv_python()) if venv_python().exists() else sys.executable, "-m", "pip"]
+        run_cmd(pip + ["install", "--quiet", "py7zr"])
+        import py7zr
+
+        with py7zr.SevenZipFile(archive) as z:
+            z.extractall(out)
+        return True
+    except Exception:
+        return False
+
+
 def install_libmpv_windows():
     import platform
     import shutil
@@ -2512,13 +2548,11 @@ def install_libmpv_windows():
         tmp = Path(tempfile.mkdtemp())
         archive = tmp / asset["name"]
         urllib.request.urlretrieve(asset["browser_download_url"], archive)
-        pip = [str(venv_python()) if venv_python().exists() else sys.executable, "-m", "pip"]
-        run_cmd(pip + ["install", "--quiet", "py7zr"])
-        import py7zr
-
-        with py7zr.SevenZipFile(archive) as z:
-            z.extractall(tmp / "x")
-        dll = next((tmp / "x").rglob("libmpv-2.dll"), None) or next((tmp / "x").rglob("mpv-2.dll"), None)
+        out = tmp / "x"
+        out.mkdir()
+        if not extract_7z(archive, out):
+            raise RuntimeError("could not unpack the archive")
+        dll = next(out.rglob("libmpv-2.dll"), None) or next(out.rglob("mpv-2.dll"), None)
         if dll is None:
             raise RuntimeError("libmpv dll not found in archive")
         shutil.copy2(dll, script_dir() / "mpv-2.dll")
