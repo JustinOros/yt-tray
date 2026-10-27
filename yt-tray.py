@@ -1845,6 +1845,8 @@ class App:
         self.popup_proc = None
         theme = self.effective_theme()
         self.images[(theme, "idle", 0)] = make_icon_image("idle", theme)
+        if sys.platform == "win32":
+            self.enable_dark_menus()
         self.icon = None
         if sys.platform.startswith("linux") and pystray.Icon.__module__.endswith("_appindicator"):
             try:
@@ -1858,6 +1860,20 @@ class App:
         if self.icon is None:
             self.icon = pystray.Icon(APP, self.images[(theme, "idle", 0)], APP, self.build_menu())
         threading.Thread(target=self.animate, daemon=True).start()
+
+    def enable_dark_menus(self):
+        try:
+            import ctypes
+
+            uxtheme = ctypes.WinDLL("uxtheme")
+            set_mode = uxtheme[135]
+            set_mode.argtypes = [ctypes.c_int]
+            set_mode.restype = ctypes.c_int
+            set_mode(1)
+            flush = uxtheme[136]
+            flush()
+        except Exception:
+            log.exception("dark menu setup failed")
 
     def build_menu(self):
         ps = self.pystray
