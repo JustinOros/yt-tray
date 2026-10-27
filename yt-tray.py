@@ -2441,7 +2441,24 @@ PIP_DEPS = {
     "mpv": "python-mpv>=1.0.6",
     "pystray": "pystray>=0.19.5",
     "PIL": "Pillow>=10.0",
+    "truststore": "truststore>=0.9",
 }
+
+
+def setup_tls():
+    try:
+        import truststore
+
+        truststore.inject_into_ssl()
+        return
+    except Exception:
+        pass
+    try:
+        import certifi
+
+        os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+    except Exception:
+        pass
 
 
 def script_dir():
@@ -2862,6 +2879,7 @@ def main():
         bootstrap(args.setup)
     elif args.setup:
         return 0
+    setup_tls()
     if args.install_service:
         return service_install()
     if args.remove_service:
