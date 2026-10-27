@@ -6,7 +6,7 @@ yt-dlp resolves the raw audio stream and mpv plays it, so no ad is ever requeste
 
 ## Features
 
-- Tray icon toggles Play/Pause on left-click (middle-click on GNOME), and the icon shows the state (grey idle, blue loading, green playing, amber paused)
+- Tray icon toggles Play/Pause on left-click, and the icon shows the state (grey idle, blue loading, green playing, amber paused)
 - First Play with nothing queued opens a small search box
 - Right-click menu: Play/Pause, Search, Next, Previous, Now Playing (current title), Shuffle toggle, Quit
 - Search finds a YouTube playlist from your text and starts playing it, shuffled or in order
@@ -76,7 +76,7 @@ Arch:
 sudo pacman -S mpv tk python-gobject libayatana-appindicator
 ```
 
-On older Ubuntu releases the package is `libmpv1` instead of `libmpv2`. GNOME needs the AppIndicator extension to show tray icons. With the AppIndicator backend (GNOME) a left-click always opens the menu, so middle-click the icon to toggle Play/Pause, or use the first menu item. Desktops using the plain X11 tray (KDE, XFCE, MATE and others) get the left-click toggle.
+On older Ubuntu releases the package is `libmpv1` instead of `libmpv2`. GNOME needs the AppIndicator extension to show tray icons. On GNOME the app registers its own tray item, so left-click toggles Play/Pause and right-click opens the menu. Desktops using the plain X11 tray (KDE, XFCE, MATE and others) get the left-click toggle.
 
 ## Check that it works
 

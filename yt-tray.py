@@ -1373,6 +1373,455 @@ def make_icon_image(kind, theme="color", frame=0):
     return img.resize((64, 64), Image.LANCZOS)
 
 
+SNI_XML = """
+<node>
+  <interface name="org.kde.StatusNotifierItem">
+    <property name="Category" type="s" access="read"/>
+    <property name="Id" type="s" access="read"/>
+    <property name="Title" type="s" access="read"/>
+    <property name="Status" type="s" access="read"/>
+    <property name="WindowId" type="i" access="read"/>
+    <property name="IconName" type="s" access="read"/>
+    <property name="IconPixmap" type="a(iiay)" access="read"/>
+    <property name="OverlayIconName" type="s" access="read"/>
+    <property name="OverlayIconPixmap" type="a(iiay)" access="read"/>
+    <property name="AttentionIconName" type="s" access="read"/>
+    <property name="AttentionIconPixmap" type="a(iiay)" access="read"/>
+    <property name="AttentionMovieName" type="s" access="read"/>
+    <property name="ToolTip" type="(sa(iiay)ss)" access="read"/>
+    <property name="ItemIsMenu" type="b" access="read"/>
+    <property name="Menu" type="o" access="read"/>
+    <method name="ContextMenu"><arg type="i" name="x" direction="in"/><arg type="i" name="y" direction="in"/></method>
+    <method name="Activate"><arg type="i" name="x" direction="in"/><arg type="i" name="y" direction="in"/></method>
+    <method name="SecondaryActivate"><arg type="i" name="x" direction="in"/><arg type="i" name="y" direction="in"/></method>
+    <method name="Scroll"><arg type="i" name="delta" direction="in"/><arg type="s" name="orientation" direction="in"/></method>
+    <signal name="NewTitle"/>
+    <signal name="NewIcon"/>
+    <signal name="NewAttentionIcon"/>
+    <signal name="NewOverlayIcon"/>
+    <signal name="NewToolTip"/>
+    <signal name="NewStatus"><arg type="s" name="status"/></signal>
+  </interface>
+</node>
+"""
+
+DBUSMENU_XML = """
+<node>
+  <interface name="com.canonical.dbusmenu">
+    <property name="Version" type="u" access="read"/>
+    <property name="TextDirection" type="s" access="read"/>
+    <property name="Status" type="s" access="read"/>
+    <property name="IconThemePath" type="as" access="read"/>
+    <method name="GetLayout">
+      <arg type="i" name="parentId" direction="in"/>
+      <arg type="i" name="recursionDepth" direction="in"/>
+      <arg type="as" name="propertyNames" direction="in"/>
+      <arg type="u" name="revision" direction="out"/>
+      <arg type="(ia{sv}av)" name="layout" direction="out"/>
+    </method>
+    <method name="GetGroupProperties">
+      <arg type="ai" name="ids" direction="in"/>
+      <arg type="as" name="propertyNames" direction="in"/>
+      <arg type="a(ia{sv})" name="properties" direction="out"/>
+    </method>
+    <method name="GetProperty">
+      <arg type="i" name="id" direction="in"/>
+      <arg type="s" name="name" direction="in"/>
+      <arg type="v" name="value" direction="out"/>
+    </method>
+    <method name="Event">
+      <arg type="i" name="id" direction="in"/>
+      <arg type="s" name="eventId" direction="in"/>
+      <arg type="v" name="data" direction="in"/>
+      <arg type="u" name="timestamp" direction="in"/>
+    </method>
+    <method name="EventGroup">
+      <arg type="a(isvu)" name="events" direction="in"/>
+      <arg type="ai" name="idErrors" direction="out"/>
+    </method>
+    <method name="AboutToShow">
+      <arg type="i" name="id" direction="in"/>
+      <arg type="b" name="needUpdate" direction="out"/>
+    </method>
+    <method name="AboutToShowGroup">
+      <arg type="ai" name="ids" direction="in"/>
+      <arg type="ai" name="updatesNeeded" direction="out"/>
+      <arg type="ai" name="idErrors" direction="out"/>
+    </method>
+    <signal name="ItemsPropertiesUpdated">
+      <arg type="a(ia{sv})" name="updatedProps"/>
+      <arg type="a(ias)" name="removedProps"/>
+    </signal>
+    <signal name="LayoutUpdated">
+      <arg type="u" name="revision"/>
+      <arg type="i" name="parent"/>
+    </signal>
+    <signal name="ItemActivationRequested">
+      <arg type="i" name="id"/>
+      <arg type="u" name="timestamp"/>
+    </signal>
+  </interface>
+</node>
+"""
+
+SNI_PATH = "/StatusNotifierItem"
+MENU_PATH = "/MenuBar"
+
+
+class SniIcon:
+    def __init__(self, name, image, title, menu, on_activate):
+        import gi
+
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio, GLib
+
+        self.Gio = Gio
+        self.GLib = GLib
+        self.name = name
+        self.title_text = title
+        self.menu = menu
+        self.on_activate = on_activate
+        self.conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        reply = self.conn.call_sync(
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "NameHasOwner",
+            GLib.Variant("(s)", ("org.kde.StatusNotifierWatcher",)),
+            None,
+            Gio.DBusCallFlags.NONE,
+            2000,
+            None,
+        )
+        if not reply.unpack()[0]:
+            raise RuntimeError("no StatusNotifierWatcher")
+        self.lock = threading.Lock()
+        self.pixmap = self.to_pixmap(image)
+        self.nodes = {}
+        self.tree = None
+        self.revision = 1
+        self.signature = None
+        self.loop = None
+        self.rebuild(emit=False)
+
+    def to_pixmap(self, image):
+        img = image.convert("RGBA")
+        r, g, b, a = img.split()
+        from PIL import Image
+
+        data = Image.merge("RGBA", (a, r, g, b)).tobytes()
+        return [(img.width, img.height, data)]
+
+    def prop(self, name):
+        GLib = self.GLib
+        if name == "Category":
+            return GLib.Variant("s", "ApplicationStatus")
+        if name == "Id":
+            return GLib.Variant("s", self.name)
+        if name == "Title":
+            return GLib.Variant("s", self.title_text)
+        if name == "Status":
+            return GLib.Variant("s", "Active")
+        if name == "WindowId":
+            return GLib.Variant("i", 0)
+        if name in ("IconName", "OverlayIconName", "AttentionIconName", "AttentionMovieName"):
+            return GLib.Variant("s", "")
+        if name == "IconPixmap":
+            return GLib.Variant("a(iiay)", self.pixmap)
+        if name in ("OverlayIconPixmap", "AttentionIconPixmap"):
+            return GLib.Variant("a(iiay)", [])
+        if name == "ToolTip":
+            return GLib.Variant("(sa(iiay)ss)", ("", [], self.title_text, ""))
+        if name == "ItemIsMenu":
+            return GLib.Variant("b", False)
+        if name == "Menu":
+            return GLib.Variant("o", MENU_PATH)
+        return None
+
+    def menu_prop(self, name):
+        GLib = self.GLib
+        if name == "Version":
+            return GLib.Variant("u", 3)
+        if name == "TextDirection":
+            return GLib.Variant("s", "ltr")
+        if name == "Status":
+            return GLib.Variant("s", "normal")
+        if name == "IconThemePath":
+            return GLib.Variant("as", [])
+        return None
+
+    def build_tree(self):
+        GLib = self.GLib
+        import pystray
+
+        nodes = {}
+        counter = [0]
+
+        def make(menu):
+            children = []
+            for item in menu:
+                counter[0] += 1
+                node_id = counter[0]
+                if item is pystray.Menu.SEPARATOR:
+                    props = {"type": GLib.Variant("s", "separator")}
+                    kids = []
+                else:
+                    label = str(item.text).replace("_", "__")
+                    props = {
+                        "label": GLib.Variant("s", label),
+                        "enabled": GLib.Variant("b", bool(item.enabled)),
+                        "visible": GLib.Variant("b", True),
+                    }
+                    checked = item.checked
+                    if checked is not None:
+                        props["toggle-type"] = GLib.Variant(
+                            "s", "radio" if item.radio else "checkmark"
+                        )
+                        props["toggle-state"] = GLib.Variant("i", 1 if checked else 0)
+                    sub = item.submenu
+                    kids = []
+                    if sub is not None:
+                        props["children-display"] = GLib.Variant("s", "submenu")
+                        kids = make(sub)
+                nodes[node_id] = (item, props)
+                children.append((node_id, props, kids))
+            return children
+
+        top = make(self.menu) if self.menu is not None else []
+        return nodes, (0, {"children-display": GLib.Variant("s", "submenu")}, top)
+
+    def signature_of(self, tree):
+        def sig(node):
+            node_id, props, kids = node
+            return (
+                node_id,
+                tuple(sorted((k, v.print_(False)) for k, v in props.items())),
+                tuple(sig(k) for k in kids),
+            )
+
+        return sig(tree)
+
+    def rebuild(self, emit=True):
+        try:
+            nodes, tree = self.build_tree()
+        except Exception:
+            log.exception("sni menu build failed")
+            return
+        signature = self.signature_of(tree)
+        with self.lock:
+            changed = signature != self.signature
+            self.nodes = nodes
+            self.tree = tree
+            self.signature = signature
+            if changed:
+                self.revision += 1
+            revision = self.revision
+        if emit and changed:
+            self.emit(MENU_PATH, "com.canonical.dbusmenu", "LayoutUpdated",
+                      self.GLib.Variant("(ui)", (revision, 0)))
+
+    def emit(self, path, iface, signal, params=None):
+        try:
+            self.conn.emit_signal(None, path, iface, signal, params)
+        except Exception:
+            log.exception("sni emit failed")
+
+    def node_variant(self, node):
+        GLib = self.GLib
+        node_id, props, kids = node
+        return (
+            node_id,
+            props,
+            [GLib.Variant("(ia{sv}av)", self.node_variant(k)) for k in kids],
+        )
+
+    def find(self, node, wanted):
+        if node[0] == wanted:
+            return node
+        for kid in node[2]:
+            found = self.find(kid, wanted)
+            if found:
+                return found
+        return None
+
+    def flatten(self, node, out):
+        out.append((node[0], node[1]))
+        for kid in node[2]:
+            self.flatten(kid, out)
+
+    def on_sni_call(self, conn, sender, path, iface, method, params, invocation):
+        if method in ("Activate", "SecondaryActivate"):
+            threading.Thread(target=self.on_activate, daemon=True).start()
+        invocation.return_value(None)
+
+    def on_sni_get(self, conn, sender, path, iface, name):
+        return self.prop(name)
+
+    def on_menu_get(self, conn, sender, path, iface, name):
+        return self.menu_prop(name)
+
+    def on_menu_call(self, conn, sender, path, iface, method, params, invocation):
+        GLib = self.GLib
+        try:
+            if method == "GetLayout":
+                parent = params.unpack()[0]
+                with self.lock:
+                    tree = self.tree
+                    revision = self.revision
+                node = self.find(tree, parent) or tree
+                invocation.return_value(
+                    GLib.Variant("(u(ia{sv}av))", (revision, self.node_variant(node)))
+                )
+            elif method == "GetGroupProperties":
+                ids = params.unpack()[0]
+                flat = []
+                with self.lock:
+                    self.flatten(self.tree, flat)
+                if ids:
+                    flat = [f for f in flat if f[0] in ids]
+                invocation.return_value(GLib.Variant("(a(ia{sv}))", (flat,)))
+            elif method == "GetProperty":
+                wanted, name = params.unpack()
+                flat = []
+                with self.lock:
+                    self.flatten(self.tree, flat)
+                value = next((p.get(name) for i, p in flat if i == wanted), None)
+                if value is None:
+                    value = GLib.Variant("s", "")
+                invocation.return_value(GLib.Variant("(v)", (value,)))
+            elif method == "Event":
+                node_id, event = params.unpack()[:2]
+                self.fire(node_id, event)
+                invocation.return_value(None)
+            elif method == "EventGroup":
+                for node_id, event, _, _ in params.unpack()[0]:
+                    self.fire(node_id, event)
+                invocation.return_value(GLib.Variant("(ai)", ([],)))
+            elif method == "AboutToShow":
+                if params.unpack()[0] == 0:
+                    self.rebuild()
+                invocation.return_value(GLib.Variant("(b)", (False,)))
+            elif method == "AboutToShowGroup":
+                invocation.return_value(GLib.Variant("(aiai)", ([], [])))
+            else:
+                invocation.return_value(None)
+        except Exception:
+            log.exception("sni menu call failed")
+            invocation.return_value(None)
+
+    def fire(self, node_id, event):
+        if event != "clicked":
+            return
+        with self.lock:
+            entry = self.nodes.get(node_id)
+        if not entry:
+            return
+        item = entry[0]
+        if item.submenu is not None:
+            return
+        threading.Thread(target=item, args=(self,), daemon=True).start()
+
+    def register(self):
+        Gio = self.Gio
+        sni_info = Gio.DBusNodeInfo.new_for_xml(SNI_XML)
+        menu_info = Gio.DBusNodeInfo.new_for_xml(DBUSMENU_XML)
+        self.conn.register_object(
+            SNI_PATH, sni_info.interfaces[0], self.on_sni_call, self.on_sni_get, None
+        )
+        self.conn.register_object(
+            MENU_PATH, menu_info.interfaces[0], self.on_menu_call, self.on_menu_get, None
+        )
+        self.bus_name = "org.kde.StatusNotifierItem-%d-1" % os.getpid()
+        Gio.bus_own_name_on_connection(
+            self.conn, self.bus_name, Gio.BusNameOwnerFlags.NONE, None, None
+        )
+        self.conn.call_sync(
+            "org.kde.StatusNotifierWatcher",
+            "/StatusNotifierWatcher",
+            "org.kde.StatusNotifierWatcher",
+            "RegisterStatusNotifierItem",
+            self.GLib.Variant("(s)", (self.bus_name,)),
+            None,
+            Gio.DBusCallFlags.NONE,
+            3000,
+            None,
+        )
+
+    @property
+    def icon(self):
+        return None
+
+    @icon.setter
+    def icon(self, image):
+        self.pixmap = self.to_pixmap(image)
+        self.GLib.idle_add(
+            lambda: (self.emit(SNI_PATH, "org.kde.StatusNotifierItem", "NewIcon"), False)[1]
+        )
+
+    @property
+    def title(self):
+        return self.title_text
+
+    @title.setter
+    def title(self, value):
+        if value == self.title_text:
+            return
+        self.title_text = value
+        self.GLib.idle_add(
+            lambda: (
+                self.emit(SNI_PATH, "org.kde.StatusNotifierItem", "NewTitle"),
+                self.emit(SNI_PATH, "org.kde.StatusNotifierItem", "NewToolTip"),
+                False,
+            )[2]
+        )
+
+    @property
+    def visible(self):
+        return True
+
+    @visible.setter
+    def visible(self, value):
+        pass
+
+    def update_menu(self):
+        self.GLib.idle_add(lambda: (self.rebuild(), False)[1])
+
+    def notify(self, message, title=None):
+        GLib = self.GLib
+
+        def send():
+            try:
+                self.conn.call_sync(
+                    "org.freedesktop.Notifications",
+                    "/org/freedesktop/Notifications",
+                    "org.freedesktop.Notifications",
+                    "Notify",
+                    GLib.Variant(
+                        "(susssasa{sv}i)",
+                        (title or self.name, 0, "", title or self.name, message, [], {}, 5000),
+                    ),
+                    None,
+                    self.Gio.DBusCallFlags.NONE,
+                    2000,
+                    None,
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=send, daemon=True).start()
+
+    def run(self, setup=None):
+        self.register()
+        self.loop = self.GLib.MainLoop()
+        if setup:
+            threading.Thread(target=setup, args=(self,), daemon=True).start()
+        self.loop.run()
+
+    def stop(self):
+        if self.loop:
+            self.GLib.idle_add(lambda: (self.loop.quit(), False)[1])
+
+
 class App:
     def __init__(self):
         import pystray
@@ -1395,7 +1844,17 @@ class App:
         self.popup_proc = None
         theme = self.effective_theme()
         self.images[(theme, "idle", 0)] = make_icon_image("idle", theme)
-        self.icon = pystray.Icon(APP, self.images[(theme, "idle", 0)], APP, self.build_menu())
+        self.icon = None
+        if sys.platform.startswith("linux") and pystray.Icon.__module__.endswith("_appindicator"):
+            try:
+                self.icon = SniIcon(
+                    APP, self.images[(theme, "idle", 0)], APP, self.build_menu(), self.on_toggle
+                )
+            except Exception:
+                log.info("native tray item unavailable, using indicator", exc_info=True)
+                self.icon = None
+        if self.icon is None:
+            self.icon = pystray.Icon(APP, self.images[(theme, "idle", 0)], APP, self.build_menu())
         threading.Thread(target=self.animate, daemon=True).start()
 
     def build_menu(self):
@@ -1733,38 +2192,8 @@ class App:
 
         AppHelper.callAfter(apply)
 
-    def install_middle_click(self):
-        icon = self.icon
-        if not hasattr(icon, "_appindicator"):
-            return
-        original = icon._update_menu
-
-        from gi.repository import GObject
-
-        def follow():
-            try:
-                handle = getattr(icon, "_menu_handle", None)
-                children = handle.get_children() if handle else []
-                if children:
-                    icon._appindicator.set_secondary_activate_target(children[0])
-            except Exception:
-                log.exception("middle click setup failed")
-            return False
-
-        def patched():
-            original()
-            GObject.idle_add(follow)
-
-        icon._update_menu = patched
-        icon.update_menu()
-
     def run(self):
         def setup(icon):
-            if sys.platform.startswith("linux"):
-                try:
-                    self.install_middle_click()
-                except Exception:
-                    log.exception("middle click setup failed")
             if sys.platform == "darwin":
                 try:
                     self.install_mac_click()
