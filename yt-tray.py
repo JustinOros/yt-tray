@@ -1733,8 +1733,38 @@ class App:
 
         AppHelper.callAfter(apply)
 
+    def install_middle_click(self):
+        icon = self.icon
+        if not hasattr(icon, "_appindicator"):
+            return
+        original = icon._update_menu
+
+        from gi.repository import GObject
+
+        def follow():
+            try:
+                handle = getattr(icon, "_menu_handle", None)
+                children = handle.get_children() if handle else []
+                if children:
+                    icon._appindicator.set_secondary_activate_target(children[0])
+            except Exception:
+                log.exception("middle click setup failed")
+            return False
+
+        def patched():
+            original()
+            GObject.idle_add(follow)
+
+        icon._update_menu = patched
+        icon.update_menu()
+
     def run(self):
         def setup(icon):
+            if sys.platform.startswith("linux"):
+                try:
+                    self.install_middle_click()
+                except Exception:
+                    log.exception("middle click setup failed")
             if sys.platform == "darwin":
                 try:
                     self.install_mac_click()
