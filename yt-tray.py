@@ -1650,6 +1650,7 @@ class SniIcon:
             self.flatten(kid, out)
 
     def on_sni_call(self, conn, sender, path, iface, method, params, invocation):
+        log.info("tray call: %s", method)
         if method in ("Activate", "SecondaryActivate"):
             threading.Thread(target=self.on_activate, daemon=True).start()
         invocation.return_value(None)
@@ -1853,6 +1854,7 @@ class App:
             except Exception:
                 log.info("native tray item unavailable, using indicator", exc_info=True)
                 self.icon = None
+        log.info("tray: %s", "native" if self.icon is not None else "indicator fallback")
         if self.icon is None:
             self.icon = pystray.Icon(APP, self.images[(theme, "idle", 0)], APP, self.build_menu())
         threading.Thread(target=self.animate, daemon=True).start()
