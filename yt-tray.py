@@ -2103,10 +2103,6 @@ class App:
 
     def notify(self, message):
         log.info("notify: %s", message)
-        try:
-            self.icon.notify(message, APP)
-        except Exception:
-            pass
 
     def open_search(self):
         if not self.dialog_lock.acquire(blocking=False):
