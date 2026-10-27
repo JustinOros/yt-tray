@@ -1973,6 +1973,63 @@ def install_system_packages():
         say("libmpv is still missing, playback will not work until it is installed")
 
 
+GNOME_TRAY_UUID = "appindicatorsupport@rgcjonas.gmail.com"
+
+
+def ensure_gnome_tray():
+    if not sys.platform.startswith("linux"):
+        return
+    if "gnome" not in os.environ.get("XDG_CURRENT_DESKTOP", "").lower():
+        return
+    if not have_command("gnome-extensions"):
+        return
+
+    def listing(*flags):
+        try:
+            out = subprocess.run(
+                ["gnome-extensions", "list", *flags],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            return out.stdout
+        except Exception:
+            return ""
+
+    if GNOME_TRAY_UUID in listing():
+        if GNOME_TRAY_UUID not in listing("--enabled"):
+            run_cmd(["gnome-extensions", "enable", GNOME_TRAY_UUID])
+        return
+    marker = config_dir() / ".gnome-tray"
+    if marker.exists():
+        return
+    try:
+        marker.write_text("1")
+    except OSError:
+        pass
+    pre = sudo_prefix()
+    if pre is None:
+        say("GNOME needs the AppIndicator extension to show the tray icon")
+        return
+    say("installing the GNOME AppIndicator extension for the tray icon")
+    pkg = "gnome-shell-extension-appindicator"
+    if have_command("dnf"):
+        done = run_cmd(pre + ["dnf", "install", "-y", pkg])
+    elif have_command("apt-get"):
+        done = run_cmd(pre + ["apt-get", "install", "-y", pkg])
+    elif have_command("pacman"):
+        done = run_cmd(pre + ["pacman", "-S", "--noconfirm", pkg])
+    elif have_command("zypper"):
+        done = run_cmd(pre + ["zypper", "--non-interactive", "install", pkg])
+    else:
+        done = False
+    if not done:
+        say("could not install the extension, install gnome-shell-extension-appindicator manually")
+        return
+    run_cmd(["gnome-extensions", "enable", GNOME_TRAY_UUID])
+    say("log out and back in once, then the tray icon will appear")
+
+
 def install_libmpv_windows():
     import platform
     import shutil
@@ -2038,6 +2095,7 @@ def bootstrap(setup_only=False):
             + missing
         )
     install_system_packages()
+    ensure_gnome_tray()
     if setup_only:
         ok = all(have_module(m) for m in PIP_DEPS) and have_libmpv()
         say("ready" if ok else "setup incomplete, see messages above")
