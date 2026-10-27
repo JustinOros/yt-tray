@@ -66,6 +66,7 @@ DEFAULT_STATE = {
     "shuffle": True,
     "theme": "auto",
     "notifications": True,
+    "pin_icon": True,
     "spotify": [],
     "orig": [],
     "order": [],
@@ -1963,6 +1964,12 @@ class App:
                 ),
             ),
             ps.MenuItem(
+                "Always show icon",
+                self.on_pin_icon,
+                checked=lambda item: bool(self.store.data.get("pin_icon", True)),
+                visible=sys.platform == "win32",
+            ),
+            ps.MenuItem(
                 "Icon style",
                 ps.Menu(
                     *[
@@ -2085,6 +2092,53 @@ class App:
             )
         except Exception:
             log.exception("popup failed")
+
+    def on_pin_icon(self, icon=None, item=None):
+        self.store.data["pin_icon"] = not self.store.data.get("pin_icon", True)
+        self.store.save()
+        self.apply_pin_icon()
+
+    def apply_pin_icon(self):
+        if sys.platform != "win32":
+            return
+        try:
+            import winreg
+
+            wanted = 1 if self.store.data.get("pin_icon", True) else 0
+            exes = {sys.executable, getattr(sys, "_base_executable", "") or ""}
+            for name in ("python.exe", "pythonw.exe"):
+                exes.add(os.path.join(sys.base_prefix, name))
+                exes.add(os.path.join(os.path.dirname(sys.executable), name))
+            exes = {os.path.normcase(os.path.abspath(e)) for e in exes if e}
+            root = r"Control Panel\NotifyIconSettings"
+            base = winreg.OpenKey(winreg.HKEY_CURRENT_USER, root)
+            count = winreg.QueryInfoKey(base)[0]
+            names = [winreg.EnumKey(base, i) for i in range(count)]
+            winreg.CloseKey(base)
+            for name in names:
+                key = winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    root + "\\" + name,
+                    0,
+                    winreg.KEY_READ | winreg.KEY_SET_VALUE,
+                )
+                try:
+                    path = winreg.QueryValueEx(key, "ExecutablePath")[0]
+                except OSError:
+                    path = ""
+                if path and os.path.normcase(os.path.abspath(path)) in exes:
+                    winreg.SetValueEx(key, "IsPromoted", 0, winreg.REG_DWORD, wanted)
+                winreg.CloseKey(key)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            log.exception("pin icon failed")
+
+    def pin_icon_later(self):
+        for delay in (2, 6, 20, 60):
+            if self.ctl.stop_flag.wait(delay):
+                return
+            self.apply_pin_icon()
 
     def make_notify_action(self, on):
         def action(icon=None, item=None):
@@ -2275,6 +2329,8 @@ class App:
                     log.exception("mac click handling failed, using default menu click")
             icon.visible = True
             self.refresh()
+            if sys.platform == "win32":
+                threading.Thread(target=self.pin_icon_later, daemon=True).start()
             if getattr(self, "startup", False) and sys.platform == "win32":
                 threading.Thread(target=self.reshow_icon, daemon=True).start()
 
