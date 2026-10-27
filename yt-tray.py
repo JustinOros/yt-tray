@@ -2255,6 +2255,17 @@ class App:
 
         AppHelper.callAfter(apply)
 
+    def reshow_icon(self):
+        for delay in (10, 30, 60):
+            if self.ctl.stop_flag.wait(delay):
+                return
+            try:
+                self.icon.visible = False
+                self.icon.visible = True
+                self.refresh()
+            except Exception:
+                log.exception("icon re-register failed")
+
     def run(self):
         def setup(icon):
             if sys.platform == "darwin":
@@ -2264,6 +2275,8 @@ class App:
                     log.exception("mac click handling failed, using default menu click")
             icon.visible = True
             self.refresh()
+            if getattr(self, "startup", False) and sys.platform == "win32":
+                threading.Thread(target=self.reshow_icon, daemon=True).start()
 
         self.icon.run(setup)
 
@@ -2661,6 +2674,20 @@ def bootstrap(setup_only=False):
 SERVICE_LABEL = "com.justinoros.yt-tray"
 
 
+def wait_for_taskbar(timeout=120):
+    try:
+        import ctypes
+
+        end = time.time() + timeout
+        while time.time() < end:
+            if ctypes.windll.user32.FindWindowW("Shell_TrayWnd", None):
+                break
+            time.sleep(1)
+        time.sleep(3)
+    except Exception:
+        log.exception("taskbar wait failed")
+
+
 def service_command():
     py = venv_python() if venv_python().exists() else Path(sys.executable)
     if sys.platform == "win32" and py.name.lower() == "python.exe":
@@ -2681,7 +2708,7 @@ def service_install():
             0,
             winreg.KEY_SET_VALUE,
         )
-        winreg.SetValueEx(key, APP, 0, winreg.REG_SZ, f'"{py}" "{script}"')
+        winreg.SetValueEx(key, APP, 0, winreg.REG_SZ, f'"{py}" "{script}" --startup')
         winreg.CloseKey(key)
         print("installed: starts at login")
     elif sys.platform == "darwin":
@@ -2757,6 +2784,7 @@ def main():
     parser.add_argument("--setup", action="store_true")
     parser.add_argument("--stop", action="store_true")
     parser.add_argument("--restart", action="store_true")
+    parser.add_argument("--startup", action="store_true")
     parser.add_argument("--install-service", action="store_true")
     parser.add_argument("--remove-service", action="store_true")
     args = parser.parse_args()
@@ -2792,7 +2820,10 @@ def main():
         log.info("already running")
         return 0
     try:
+        if args.startup and sys.platform == "win32":
+            wait_for_taskbar()
         app = App()
+        app.startup = bool(args.startup)
         threading.Thread(target=control_loop, args=(lock, app), daemon=True).start()
         app.run()
     except Exception:
