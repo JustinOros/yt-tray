@@ -1464,18 +1464,29 @@ class App:
             return
         for entry in lists:
             yield ps.MenuItem(
-                self.menu_label(entry["name"]), self.make_spotify_play(entry["id"], entry["name"])
+                self.menu_label(self.spotify_label(entry)),
+                self.make_spotify_play(entry["id"], entry["name"]),
             )
         yield ps.Menu.SEPARATOR
         yield ps.MenuItem(
             "Remove",
             ps.Menu(
                 lambda: (
-                    ps.MenuItem(self.menu_label(e["name"]), self.make_spotify_remove(e["id"]))
+                    ps.MenuItem(
+                        self.menu_label(self.spotify_label(e)), self.make_spotify_remove(e["id"])
+                    )
                     for e in list(self.store.data.get("spotify") or [])
                 )
             ),
         )
+
+    def spotify_label(self, entry):
+        name = (entry.get("name") or "").strip()
+        if any(ch.isalnum() for ch in name):
+            return name
+        count = entry.get("count")
+        suffix = f"{count} tracks" if count else f"playlist {entry['id'][:4]}"
+        return f"{name} ({suffix})" if name else f"Spotify {suffix}"
 
     def menu_label(self, text):
         text = text.replace("&", "&&")
@@ -1521,7 +1532,7 @@ class App:
             self.notify(f"Could not add playlist: {exc}")
             return
         lists = [e for e in self.store.data.get("spotify", []) if e["id"] != pid]
-        lists.append({"id": pid, "name": name})
+        lists.append({"id": pid, "name": name, "count": len(entries)})
         self.store.data["spotify"] = lists
         self.store.save()
         self.refresh()
