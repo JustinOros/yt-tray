@@ -1653,7 +1653,8 @@ class App:
         if not self.dialog_lock.acquire(blocking=False):
             return
         try:
-            query = ask_query(self.store.data.get("query", ""))
+            last = self.store.data.get("query", "")
+            query = ask_query("" if last.startswith("spotify:") else last)
         finally:
             self.dialog_lock.release()
         if query:
