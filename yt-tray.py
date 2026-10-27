@@ -970,20 +970,83 @@ def dialog_main(initial):
     sys.stdout.flush()
 
 
+def popup_main_mac(title, thumb_url, seconds):
+    import AppKit
+    import Foundation
+    from PyObjCTools import AppHelper
+
+    app = AppKit.NSApplication.sharedApplication()
+    app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+    data = None
+    try:
+        req = urllib.request.Request(thumb_url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = resp.read()
+    except Exception:
+        data = None
+    width, height = 372, 96
+    frame = AppKit.NSScreen.mainScreen().visibleFrame()
+    x = frame.origin.x + frame.size.width - width - 20
+    y = frame.origin.y + frame.size.height - height - 12
+    win = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+        Foundation.NSMakeRect(x, y, width, height),
+        AppKit.NSWindowStyleMaskBorderless,
+        AppKit.NSBackingStoreBuffered,
+        False,
+    )
+    win.setLevel_(AppKit.NSStatusWindowLevel)
+    win.setOpaque_(False)
+    win.setBackgroundColor_(AppKit.NSColor.clearColor())
+    win.setHasShadow_(True)
+    win.setIgnoresMouseEvents_(True)
+    win.setReleasedWhenClosed_(False)
+    content = win.contentView()
+    content.setWantsLayer_(True)
+    layer = content.layer()
+    layer.setBackgroundColor_(
+        AppKit.NSColor.colorWithCalibratedWhite_alpha_(0.13, 0.96).CGColor()
+    )
+    layer.setCornerRadius_(12)
+    text_x = 16
+    if data:
+        image = AppKit.NSImage.alloc().initWithData_(
+            Foundation.NSData.dataWithBytes_length_(data, len(data))
+        )
+        if image is not None:
+            view = AppKit.NSImageView.alloc().initWithFrame_(
+                Foundation.NSMakeRect(12, 12, 128, 72)
+            )
+            view.setImage_(image)
+            view.setImageScaling_(AppKit.NSImageScaleProportionallyUpOrDown)
+            view.setWantsLayer_(True)
+            view.layer().setCornerRadius_(6)
+            view.layer().setMasksToBounds_(True)
+            content.addSubview_(view)
+            text_x = 152
+    caption = AppKit.NSTextField.labelWithString_("Now playing")
+    caption.setFont_(AppKit.NSFont.systemFontOfSize_(11))
+    caption.setTextColor_(AppKit.NSColor.lightGrayColor())
+    caption.setFrame_(Foundation.NSMakeRect(text_x, 68, width - text_x - 12, 16))
+    content.addSubview_(caption)
+    shown = title if len(title) <= 66 else title[:63] + "..."
+    label = AppKit.NSTextField.wrappingLabelWithString_(shown)
+    label.setFont_(AppKit.NSFont.boldSystemFontOfSize_(13))
+    label.setTextColor_(AppKit.NSColor.whiteColor())
+    label.setFrame_(Foundation.NSMakeRect(text_x, 12, width - text_x - 12, 54))
+    content.addSubview_(label)
+    win.orderFrontRegardless()
+    AppHelper.callLater(seconds, app.terminate_, None)
+    app.run()
+
+
 def popup_main(title, thumb_url, seconds):
+    if sys.platform == "darwin":
+        popup_main_mac(title, thumb_url, seconds)
+        return
     import base64
     import io
     import tkinter as tk
 
-    if sys.platform == "darwin":
-        try:
-            import AppKit
-
-            AppKit.NSApplication.sharedApplication().setActivationPolicy_(
-                AppKit.NSApplicationActivationPolicyAccessory
-            )
-        except Exception:
-            pass
     png = None
     try:
         from PIL import Image
@@ -1000,8 +1063,14 @@ def popup_main(title, thumb_url, seconds):
     width, height = 372, 96
     bg, fg, dim = "#202124", "#f1f3f4", "#9aa0a6"
     root = tk.Tk()
-    root.withdraw()
-    root.overrideredirect(True)
+    if sys.platform == "darwin":
+        try:
+            root.tk.call("::tk::unsupported::MacWindowStyle", "style", root._w, "plain", "none")
+        except Exception:
+            pass
+    else:
+        root.withdraw()
+        root.overrideredirect(True)
     root.attributes("-topmost", True)
     root.configure(bg=bg)
     frame = tk.Frame(root, bg=bg, highlightthickness=1, highlightbackground="#3c4043")
@@ -1028,14 +1097,37 @@ def popup_main(title, thumb_url, seconds):
     x = sw - width - 20
     y = 40 if sys.platform == "darwin" else sh - height - 70
     root.geometry(f"{width}x{height}+{x}+{y}")
-    root.deiconify()
+    if sys.platform != "darwin":
+        root.deiconify()
+    root.lift()
+    root.update()
     root.bind("<Button-1>", lambda e: root.destroy())
     frame.bind("<Button-1>", lambda e: root.destroy())
     root.after(int(seconds * 1000), root.destroy)
     root.mainloop()
 
 
+def ask_query_mac(initial):
+    script = (
+        'text returned of (display dialog "Search YouTube playlists:" '
+        f"default answer {json.dumps(initial)} with title \"yt-tray\" "
+        'buttons {"Cancel", "Play"} default button "Play")'
+    )
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script], capture_output=True, text=True, timeout=3600
+        )
+    except Exception:
+        log.exception("search dialog failed")
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip()
+
+
 def ask_query(initial=""):
+    if sys.platform == "darwin":
+        return ask_query_mac(initial)
     cmd = [sys.executable, str(Path(__file__).resolve()), "--dialog", "--text", initial]
     try:
         proc = subprocess.run(
@@ -1246,7 +1338,7 @@ class App:
             self.popup_proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=open(config_dir() / "popup.log", "a"),
                 **subprocess_flags(),
             )
         except Exception:
