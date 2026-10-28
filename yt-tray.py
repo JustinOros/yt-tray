@@ -1057,6 +1057,20 @@ class Controller:
                 pass
 
 
+def hide_dock_icon(activate=False):
+    if sys.platform != "darwin":
+        return
+    try:
+        import AppKit
+
+        app = AppKit.NSApplication.sharedApplication()
+        app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+        if activate:
+            app.activateIgnoringOtherApps_(True)
+    except Exception:
+        log.exception("hide dock icon failed")
+
+
 def dialog_main(initial, prompt="Search YouTube playlists:", button="Play"):
     import tkinter as tk
 
@@ -1068,6 +1082,7 @@ def dialog_main(initial, prompt="Search YouTube playlists:", button="Play"):
     bg, fg, field, btn, sel = "#202020", "#f0f0f0", "#2d2d2d", "#3a3a3a", "#0a64ad"
     result = {"value": ""}
     root = tk.Tk()
+    hide_dock_icon(True)
     root.title("yt-tray")
     root.resizable(False, False)
     if dark:
@@ -2327,6 +2342,7 @@ class App:
                     self.install_mac_click()
                 except Exception:
                     log.exception("mac click handling failed, using default menu click")
+            hide_dock_icon()
             icon.visible = True
             self.refresh()
             if sys.platform == "win32":
