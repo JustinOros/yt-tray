@@ -1991,6 +1991,304 @@ class SniIcon:
             self.GLib.idle_add(lambda: (self.loop.quit(), False)[1])
 
 
+MPRIS_ROOT_XML = """
+<node>
+  <interface name="org.mpris.MediaPlayer2">
+    <method name="Raise"/>
+    <method name="Quit"/>
+    <property name="CanQuit" type="b" access="read"/>
+    <property name="CanRaise" type="b" access="read"/>
+    <property name="HasTrackList" type="b" access="read"/>
+    <property name="Identity" type="s" access="read"/>
+    <property name="SupportedUriSchemes" type="as" access="read"/>
+    <property name="SupportedMimeTypes" type="as" access="read"/>
+  </interface>
+</node>
+"""
+
+MPRIS_PLAYER_XML = """
+<node>
+  <interface name="org.mpris.MediaPlayer2.Player">
+    <method name="Next"/>
+    <method name="Previous"/>
+    <method name="Pause"/>
+    <method name="PlayPause"/>
+    <method name="Stop"/>
+    <method name="Play"/>
+    <method name="Seek"><arg type="x" direction="in"/></method>
+    <method name="SetPosition"><arg type="o" direction="in"/><arg type="x" direction="in"/></method>
+    <method name="OpenUri"><arg type="s" direction="in"/></method>
+    <property name="PlaybackStatus" type="s" access="read"/>
+    <property name="Rate" type="d" access="read"/>
+    <property name="Metadata" type="a{sv}" access="read"/>
+    <property name="Volume" type="d" access="read"/>
+    <property name="Position" type="x" access="read"/>
+    <property name="MinimumRate" type="d" access="read"/>
+    <property name="MaximumRate" type="d" access="read"/>
+    <property name="CanGoNext" type="b" access="read"/>
+    <property name="CanGoPrevious" type="b" access="read"/>
+    <property name="CanPlay" type="b" access="read"/>
+    <property name="CanPause" type="b" access="read"/>
+    <property name="CanSeek" type="b" access="read"/>
+    <property name="CanControl" type="b" access="read"/>
+  </interface>
+</node>
+"""
+
+
+class MediaKeys:
+    def __init__(self, toggle, state):
+        self.toggle = toggle
+        self.state = state
+        self.mpris = None
+        self.mac = None
+
+    def play(self):
+        if self.state()[0] != "playing":
+            self.toggle()
+
+    def pause(self):
+        if self.state()[0] == "playing":
+            self.toggle()
+
+    def start(self):
+        if sys.platform == "win32":
+            threading.Thread(target=self.run_windows, daemon=True).start()
+        elif sys.platform == "darwin":
+            self.start_mac()
+        else:
+            threading.Thread(target=self.run_mpris, daemon=True).start()
+
+    def update(self):
+        if sys.platform == "darwin":
+            self.update_mac()
+        elif self.mpris is not None:
+            self.update_mpris()
+
+    def run_windows(self):
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            if not user32.RegisterHotKey(None, 1, 0x4000, 0xB3):
+                log.warning("media key is in use by another app")
+                return
+            msg = wintypes.MSG()
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
+                if msg.message == 0x0312 and msg.wParam == 1:
+                    threading.Thread(target=self.toggle, daemon=True).start()
+        except Exception:
+            log.exception("media key setup failed")
+
+    def start_mac(self):
+        try:
+            import MediaPlayer
+            from PyObjCTools import AppHelper
+
+            def setup():
+                try:
+                    center = MediaPlayer.MPRemoteCommandCenter.sharedCommandCenter()
+                    ok = MediaPlayer.MPRemoteCommandHandlerStatusSuccess
+
+                    def on_toggle(event):
+                        threading.Thread(target=self.toggle, daemon=True).start()
+                        return ok
+
+                    def on_play(event):
+                        threading.Thread(target=self.play, daemon=True).start()
+                        return ok
+
+                    def on_pause(event):
+                        threading.Thread(target=self.pause, daemon=True).start()
+                        return ok
+
+                    self.mac = [on_toggle, on_play, on_pause]
+                    for command, handler in (
+                        (center.togglePlayPauseCommand(), on_toggle),
+                        (center.playCommand(), on_play),
+                        (center.pauseCommand(), on_pause),
+                    ):
+                        command.setEnabled_(True)
+                        command.addTargetWithHandler_(handler)
+                    for command in (
+                        center.nextTrackCommand(),
+                        center.previousTrackCommand(),
+                        center.seekForwardCommand(),
+                        center.seekBackwardCommand(),
+                    ):
+                        command.setEnabled_(False)
+                    self.update_mac()
+                except Exception:
+                    log.exception("media key setup failed")
+
+            AppHelper.callAfter(setup)
+        except Exception:
+            log.exception("media key setup failed")
+
+    def update_mac(self):
+        if self.mac is None:
+            return
+        try:
+            import MediaPlayer
+            from PyObjCTools import AppHelper
+
+            status, title = self.state()
+
+            def apply():
+                try:
+                    info = MediaPlayer.MPNowPlayingInfoCenter.defaultCenter()
+                    info.setNowPlayingInfo_(
+                        {
+                            MediaPlayer.MPMediaItemPropertyTitle: title or APP,
+                            MediaPlayer.MPMediaItemPropertyArtist: APP,
+                        }
+                    )
+                    info.setPlaybackState_(
+                        MediaPlayer.MPNowPlayingPlaybackStatePlaying
+                        if status == "playing"
+                        else MediaPlayer.MPNowPlayingPlaybackStatePaused
+                    )
+                except Exception:
+                    log.exception("now playing update failed")
+
+            AppHelper.callAfter(apply)
+        except Exception:
+            log.exception("now playing update failed")
+
+    def run_mpris(self):
+        try:
+            import gi
+
+            gi.require_version("Gio", "2.0")
+            from gi.repository import Gio, GLib
+        except Exception:
+            return
+        try:
+            context = GLib.MainContext.new()
+            context.push_thread_default()
+            address = Gio.dbus_address_get_for_bus_sync(Gio.BusType.SESSION, None)
+            conn = Gio.DBusConnection.new_for_address_sync(
+                address,
+                Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+                | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+                None,
+                None,
+            )
+            self.Gio = Gio
+            self.GLib = GLib
+            self.conn = conn
+            self.last = None
+            root = Gio.DBusNodeInfo.new_for_xml(MPRIS_ROOT_XML)
+            player = Gio.DBusNodeInfo.new_for_xml(MPRIS_PLAYER_XML)
+            conn.register_object(
+                "/org/mpris/MediaPlayer2", root.interfaces[0], self.on_root_call, self.on_root_get, None
+            )
+            conn.register_object(
+                "/org/mpris/MediaPlayer2",
+                player.interfaces[0],
+                self.on_player_call,
+                self.on_player_get,
+                None,
+            )
+            Gio.bus_own_name_on_connection(
+                conn, "org.mpris.MediaPlayer2.yt_tray", Gio.BusNameOwnerFlags.NONE, None, None
+            )
+            self.mpris = True
+            loop = GLib.MainLoop.new(context, False)
+            loop.run()
+        except Exception:
+            log.exception("media key setup failed")
+
+    def mpris_status(self):
+        status, _ = self.state()
+        if status == "playing":
+            return "Playing"
+        if status == "paused":
+            return "Paused"
+        return "Stopped"
+
+    def mpris_metadata(self):
+        GLib = self.GLib
+        _, title = self.state()
+        data = {"mpris:trackid": GLib.Variant("o", "/org/yt_tray/track")}
+        if title:
+            data["xesam:title"] = GLib.Variant("s", title)
+            data["xesam:artist"] = GLib.Variant("as", [APP])
+        return data
+
+    def on_root_get(self, conn, sender, path, iface, name):
+        GLib = self.GLib
+        values = {
+            "CanQuit": GLib.Variant("b", False),
+            "CanRaise": GLib.Variant("b", False),
+            "HasTrackList": GLib.Variant("b", False),
+            "Identity": GLib.Variant("s", APP),
+            "SupportedUriSchemes": GLib.Variant("as", []),
+            "SupportedMimeTypes": GLib.Variant("as", []),
+        }
+        return values.get(name)
+
+    def on_root_call(self, conn, sender, path, iface, method, params, invocation):
+        invocation.return_value(None)
+
+    def on_player_get(self, conn, sender, path, iface, name):
+        GLib = self.GLib
+        if name == "PlaybackStatus":
+            return GLib.Variant("s", self.mpris_status())
+        if name == "Metadata":
+            return GLib.Variant("a{sv}", self.mpris_metadata())
+        if name in ("Rate", "Volume", "MinimumRate", "MaximumRate"):
+            return GLib.Variant("d", 1.0)
+        if name == "Position":
+            return GLib.Variant("x", 0)
+        if name in ("CanPlay", "CanPause", "CanControl"):
+            return GLib.Variant("b", True)
+        if name in ("CanGoNext", "CanGoPrevious", "CanSeek"):
+            return GLib.Variant("b", False)
+        return None
+
+    def on_player_call(self, conn, sender, path, iface, method, params, invocation):
+        log.info("media call: %s", method)
+        if method == "PlayPause":
+            threading.Thread(target=self.toggle, daemon=True).start()
+        elif method == "Play":
+            threading.Thread(target=self.play, daemon=True).start()
+        elif method in ("Pause", "Stop"):
+            threading.Thread(target=self.pause, daemon=True).start()
+        invocation.return_value(None)
+
+    def update_mpris(self):
+        status = self.mpris_status()
+        _, title = self.state()
+        current = (status, title)
+        if current == self.last:
+            return
+        self.last = current
+        GLib = self.GLib
+
+        def emit():
+            try:
+                changed = {
+                    "PlaybackStatus": GLib.Variant("s", status),
+                    "Metadata": GLib.Variant("a{sv}", self.mpris_metadata()),
+                }
+                self.conn.emit_signal(
+                    None,
+                    "/org/mpris/MediaPlayer2",
+                    "org.freedesktop.DBus.Properties",
+                    "PropertiesChanged",
+                    GLib.Variant(
+                        "(sa{sv}as)", ("org.mpris.MediaPlayer2.Player", changed, [])
+                    ),
+                )
+            except Exception:
+                log.exception("media status update failed")
+            return False
+
+        GLib.idle_add(emit)
+
+
 class App:
     def __init__(self):
         import pystray
@@ -2002,6 +2300,7 @@ class App:
         self.frame = 0
         self.system_dark = detect_system_dark()
         self.player = make_player()
+        self.media = MediaKeys(self.on_toggle, lambda: (self.ctl.status, self.ctl.now_title()))
         self.ctl = Controller(
             self.store,
             self.player,
@@ -2301,6 +2600,7 @@ class App:
             self.set_icon(kind, self.frame)
             self.icon.title = self.tooltip()
             self.icon.update_menu()
+            self.media.update()
         except Exception:
             log.exception("icon refresh failed")
 
@@ -2452,6 +2752,7 @@ class App:
                 except Exception:
                     log.exception("mac click handling failed, using default menu click")
             hide_dock_icon()
+            self.media.start()
             icon.visible = True
             self.refresh()
             if sys.platform == "win32":
@@ -2568,6 +2869,8 @@ PIP_DEPS = {
     "PIL": "Pillow>=10.0",
     "truststore": "truststore>=0.9",
 }
+if sys.platform == "darwin":
+    PIP_DEPS["MediaPlayer"] = "pyobjc-framework-MediaPlayer"
 
 
 def setup_tls():
