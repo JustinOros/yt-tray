@@ -67,6 +67,7 @@ DEFAULT_STATE = {
     "theme": "auto",
     "notifications": True,
     "pin_icon": True,
+    "cookies_browser": "",
     "spotify": [],
     "orig": [],
     "order": [],
@@ -129,7 +130,68 @@ def subprocess_flags():
     return {"creationflags": 0x08000000} if sys.platform == "win32" else {}
 
 
-def ytdlp_json(args, timeout=120):
+COOKIES = {"browser": "", "save": None, "retry_after": 0.0, "lock": threading.Lock()}
+VIDEO_STATE_ERRORS = ("unavailable", "private video", "removed", "terminated", "copyright")
+
+
+def browser_candidates():
+    home = Path.home()
+    if sys.platform == "darwin":
+        support = home / "Library" / "Application Support"
+        table = [
+            ("chrome", support / "Google" / "Chrome"),
+            ("firefox", support / "Firefox" / "Profiles"),
+            ("brave", support / "BraveSoftware" / "Brave-Browser"),
+            ("edge", support / "Microsoft Edge"),
+            ("chromium", support / "Chromium"),
+            ("vivaldi", support / "Vivaldi"),
+            ("safari", home / "Library" / "Containers" / "com.apple.Safari"),
+        ]
+    elif sys.platform == "win32":
+        local = Path(os.environ.get("LOCALAPPDATA") or home / "AppData" / "Local")
+        roam = Path(os.environ.get("APPDATA") or home / "AppData" / "Roaming")
+        table = [
+            ("firefox", roam / "Mozilla" / "Firefox" / "Profiles"),
+            ("edge", local / "Microsoft" / "Edge" / "User Data"),
+            ("chrome", local / "Google" / "Chrome" / "User Data"),
+            ("brave", local / "BraveSoftware" / "Brave-Browser" / "User Data"),
+            ("vivaldi", local / "Vivaldi" / "User Data"),
+        ]
+    else:
+        config = home / ".config"
+        table = [
+            ("firefox", home / ".mozilla" / "firefox"),
+            ("firefox", home / "snap" / "firefox" / "common" / ".mozilla" / "firefox"),
+            ("chrome", config / "google-chrome"),
+            ("chromium", config / "chromium"),
+            ("brave", config / "BraveSoftware" / "Brave-Browser"),
+            ("edge", config / "microsoft-edge"),
+            ("vivaldi", config / "vivaldi"),
+        ]
+    out = []
+    for name, path in table:
+        if name not in out and path.exists():
+            out.append(name)
+    return out
+
+
+def is_bot_error(text):
+    text = (text or "").lower()
+    return "not a bot" in text or "sign in to confirm" in text
+
+
+def adopt_browser(name):
+    COOKIES["browser"] = name
+    log.info("using cookies from %s", name)
+    save = COOKIES["save"]
+    if save:
+        try:
+            save(name)
+        except Exception:
+            log.exception("could not save cookie browser")
+
+
+def run_ytdlp(args, timeout, browser=""):
     cmd = [
         sys.executable,
         "-m",
@@ -139,6 +201,8 @@ def ytdlp_json(args, timeout=120):
         "--socket-timeout",
         "20",
     ]
+    if browser:
+        cmd += ["--cookies-from-browser", browser]
     cmd += shlex.split(os.environ.get("YT_TRAY_YTDLP_ARGS", ""))
     cmd += args
     try:
@@ -161,6 +225,45 @@ def ytdlp_json(args, timeout=120):
         return json.loads(proc.stdout)
     except ValueError:
         raise YtdlpError("yt-dlp returned unreadable output")
+
+
+def ytdlp_json(args, timeout=120):
+    browser = COOKIES["browser"]
+    try:
+        return run_ytdlp(args, timeout, browser)
+    except YtdlpError as exc:
+        if not is_bot_error(str(exc)) or "--cookies" in os.environ.get("YT_TRAY_YTDLP_ARGS", ""):
+            raise
+        first_error = exc
+    with COOKIES["lock"]:
+        current = COOKIES["browser"]
+        if current and current != browser:
+            try:
+                return run_ytdlp(args, timeout, current)
+            except YtdlpError as exc:
+                if not is_bot_error(str(exc)):
+                    raise
+        if time.time() < COOKIES["retry_after"]:
+            raise first_error
+        COOKIES["browser"] = ""
+        for name in browser_candidates():
+            if name == browser or name == current:
+                continue
+            try:
+                result = run_ytdlp(args, timeout, name)
+            except YtdlpError as exc:
+                if any(k in str(exc).lower() for k in VIDEO_STATE_ERRORS):
+                    adopt_browser(name)
+                    raise
+                log.info("cookies from %s did not help: %s", name, exc)
+                continue
+            adopt_browser(name)
+            return result
+        COOKIES["retry_after"] = time.time() + 600
+        log.warning(
+            "bot check: no signed in browser found, sign in to YouTube in Chrome or Firefox on this computer"
+        )
+        raise first_error
 
 
 def update_ytdlp():
@@ -1908,6 +2011,8 @@ class App:
             on_track=self.show_popup,
         )
         self.popup_proc = None
+        COOKIES["browser"] = self.store.data.get("cookies_browser", "") or ""
+        COOKIES["save"] = self.save_cookie_browser
         theme = self.effective_theme()
         self.images[(theme, "idle", 0)] = make_icon_image("idle", theme)
         if sys.platform == "win32":
@@ -1925,6 +2030,10 @@ class App:
         if self.icon is None:
             self.icon = pystray.Icon(APP, self.images[(theme, "idle", 0)], APP, self.build_menu())
         threading.Thread(target=self.animate, daemon=True).start()
+
+    def save_cookie_browser(self, name):
+        self.store.data["cookies_browser"] = name
+        self.store.save()
 
     def enable_dark_menus(self):
         try:
