@@ -82,7 +82,7 @@ jobs:
           path: yt-tray-windows-x64.zip
 
   macos:
-    runs-on: macos-14
+    runs-on: macos-latest
     env:
       MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
       MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}

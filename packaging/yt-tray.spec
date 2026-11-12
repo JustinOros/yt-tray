@@ -8,7 +8,7 @@ pkg = Path(SPECPATH)
 binaries = []
 libs = os.environ.get("MPV_LIBS_DIR")
 if libs:
-    for f in sorted(Path(libs).iterdir()):
+    for f in sorted(Path(libs).resolve().iterdir()):
         if f.is_file():
             binaries.append((str(f), "."))
 
