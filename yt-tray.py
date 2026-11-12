@@ -3667,6 +3667,7 @@ def main():
         dialog_main(args.text, args.prompt, args.button, args.out or None)
         return 0
     if args.popup:
+        setup_tls()
         popup_main(args.text, args.thumb_url, args.seconds)
         return 0
     if args.discord_id:
