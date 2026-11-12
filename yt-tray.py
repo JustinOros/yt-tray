@@ -2037,9 +2037,11 @@ MPRIS_PLAYER_XML = """
 
 
 class MediaKeys:
-    def __init__(self, toggle, state):
+    def __init__(self, toggle, state, forward, back):
         self.toggle = toggle
         self.state = state
+        self.forward = forward
+        self.back = back
         self.mpris = None
         self.mac = None
 
@@ -2071,13 +2073,19 @@ class MediaKeys:
             from ctypes import wintypes
 
             user32 = ctypes.windll.user32
-            if not user32.RegisterHotKey(None, 1, 0x4000, 0xB3):
-                log.warning("media key is in use by another app")
+            actions = {1: (0xB3, self.toggle), 2: (0xB0, self.forward), 3: (0xB1, self.back)}
+            registered = 0
+            for key_id, (code, _) in actions.items():
+                if user32.RegisterHotKey(None, key_id, 0x4000, code):
+                    registered += 1
+                else:
+                    log.warning("media key %s is in use by another app", hex(code))
+            if not registered:
                 return
             msg = wintypes.MSG()
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
-                if msg.message == 0x0312 and msg.wParam == 1:
-                    threading.Thread(target=self.toggle, daemon=True).start()
+                if msg.message == 0x0312 and msg.wParam in actions:
+                    threading.Thread(target=actions[msg.wParam][1], daemon=True).start()
         except Exception:
             log.exception("media key setup failed")
 
@@ -2103,17 +2111,25 @@ class MediaKeys:
                         threading.Thread(target=self.pause, daemon=True).start()
                         return ok
 
-                    self.mac = [on_toggle, on_play, on_pause]
+                    def on_forward(event):
+                        threading.Thread(target=self.forward, daemon=True).start()
+                        return ok
+
+                    def on_back(event):
+                        threading.Thread(target=self.back, daemon=True).start()
+                        return ok
+
+                    self.mac = [on_toggle, on_play, on_pause, on_forward, on_back]
                     for command, handler in (
                         (center.togglePlayPauseCommand(), on_toggle),
                         (center.playCommand(), on_play),
                         (center.pauseCommand(), on_pause),
+                        (center.nextTrackCommand(), on_forward),
+                        (center.previousTrackCommand(), on_back),
                     ):
                         command.setEnabled_(True)
                         command.addTargetWithHandler_(handler)
                     for command in (
-                        center.nextTrackCommand(),
-                        center.previousTrackCommand(),
                         center.seekForwardCommand(),
                         center.seekBackwardCommand(),
                     ):
@@ -2242,9 +2258,9 @@ class MediaKeys:
             return GLib.Variant("d", 1.0)
         if name == "Position":
             return GLib.Variant("x", 0)
-        if name in ("CanPlay", "CanPause", "CanControl"):
+        if name in ("CanPlay", "CanPause", "CanControl", "CanGoNext", "CanGoPrevious"):
             return GLib.Variant("b", True)
-        if name in ("CanGoNext", "CanGoPrevious", "CanSeek"):
+        if name == "CanSeek":
             return GLib.Variant("b", False)
         return None
 
@@ -2256,6 +2272,10 @@ class MediaKeys:
             threading.Thread(target=self.play, daemon=True).start()
         elif method in ("Pause", "Stop"):
             threading.Thread(target=self.pause, daemon=True).start()
+        elif method == "Next":
+            threading.Thread(target=self.forward, daemon=True).start()
+        elif method == "Previous":
+            threading.Thread(target=self.back, daemon=True).start()
         invocation.return_value(None)
 
     def update_mpris(self):
@@ -2300,7 +2320,12 @@ class App:
         self.frame = 0
         self.system_dark = detect_system_dark()
         self.player = make_player()
-        self.media = MediaKeys(self.on_toggle, lambda: (self.ctl.status, self.ctl.now_title()))
+        self.media = MediaKeys(
+            self.on_toggle,
+            lambda: (self.ctl.status, self.ctl.now_title()),
+            self.on_next,
+            self.on_previous,
+        )
         self.ctl = Controller(
             self.store,
             self.player,
