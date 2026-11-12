@@ -147,7 +147,10 @@ jobs:
           spctl -a -vv dist/yt-tray.app
       - name: Disk image
         run: |
-          hdiutil create -volname yt-tray -srcfolder dist/yt-tray.app -ov -format UDZO yt-tray-macos-arm64.dmg
+          mkdir dmgroot
+          cp -R dist/yt-tray.app dmgroot/
+          ln -s /Applications dmgroot/Applications
+          hdiutil create -volname yt-tray -srcfolder dmgroot -ov -format UDZO yt-tray-macos-arm64.dmg
           if [ -n "$IDENTITY" ]; then codesign --force --timestamp --sign "$IDENTITY" yt-tray-macos-arm64.dmg; fi
       - uses: actions/upload-artifact@v4
         with:
