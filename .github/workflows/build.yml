@@ -1,0 +1,177 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-venv python3-tk python3-gi gir1.2-glib-2.0 libmpv2 xvfb libxcb-cursor0
+      - name: Python packages
+        run: |
+          python3 -m venv --system-site-packages .buildvenv
+          .buildvenv/bin/pip install pyinstaller pystray Pillow python-mpv pypresence truststore python-xlib
+      - name: Icons
+        run: .buildvenv/bin/python packaging/make_icons.py packaging
+      - name: Build
+        run: xvfb-run -a .buildvenv/bin/pyinstaller --noconfirm packaging/yt-tray.spec
+      - name: AppImage
+        run: |
+          mkdir -p AppDir/usr/bin
+          cp -r dist/yt-tray AppDir/usr/bin/
+          printf '#!/bin/sh\nHERE="$(dirname "$(readlink -f "$0")")"\nexec "$HERE/usr/bin/yt-tray/yt-tray" "$@"\n' > AppDir/AppRun
+          chmod +x AppDir/AppRun
+          cp packaging/icon.png AppDir/yt-tray.png
+          printf '[Desktop Entry]\nType=Application\nName=yt-tray\nExec=yt-tray\nIcon=yt-tray\nCategories=AudioVideo;Audio;\n' > AppDir/yt-tray.desktop
+          wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool-x86_64.AppImage
+          ARCH=x86_64 ./appimagetool-x86_64.AppImage --appimage-extract-and-run AppDir yt-tray-linux-x86_64.AppImage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: yt-tray-linux-x86_64.AppImage
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python packages
+        run: pip install pyinstaller pystray Pillow python-mpv pypresence truststore
+      - name: libmpv
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $release = Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest
+          $asset = $release.assets | Where-Object { $_.name -like "mpv-dev-x86_64-2*.7z" -and $_.name -notlike "*v3*" } | Select-Object -First 1
+          Invoke-WebRequest $asset.browser_download_url -OutFile mpvdev.7z
+          7z x mpvdev.7z -ompvdev -y
+          New-Item -ItemType Directory -Force mpvlibs | Out-Null
+          $dll = Get-ChildItem -Recurse mpvdev -Filter "libmpv-2.dll" | Select-Object -First 1
+          Copy-Item $dll.FullName mpvlibs\libmpv-2.dll
+      - name: Icons
+        run: python packaging/make_icons.py packaging
+      - name: Build
+        env:
+          MPV_LIBS_DIR: mpvlibs
+        run: pyinstaller --noconfirm packaging/yt-tray.spec
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path dist\yt-tray -DestinationPath yt-tray-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: yt-tray-windows-x64.zip
+
+  macos:
+    runs-on: macos-14
+    env:
+      MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
+      MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Packages
+        run: |
+          brew install mpv dylibbundler
+          pip install pyinstaller pystray Pillow python-mpv pypresence truststore pyobjc-framework-Cocoa pyobjc-framework-Quartz pyobjc-framework-MediaPlayer
+      - name: Bundle libmpv
+        run: |
+          mkdir mpvlibs
+          cp "$(brew --prefix mpv)/lib/libmpv.2.dylib" mpvlibs/
+          chmod u+w mpvlibs/libmpv.2.dylib
+          dylibbundler -of -b -x mpvlibs/libmpv.2.dylib -d mpvlibs -p @loader_path/
+      - name: Icons
+        run: python packaging/make_icons.py packaging
+      - name: Build
+        env:
+          MPV_LIBS_DIR: mpvlibs
+        run: pyinstaller --noconfirm packaging/yt-tray.spec
+      - name: Sign
+        if: env.MAC_CERT_P12 != ''
+        run: |
+          echo "$MAC_CERT_P12" | base64 --decode > cert.p12
+          KC_PW="$(uuidgen)"
+          security create-keychain -p "$KC_PW" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p "$KC_PW" build.keychain
+          security import cert.p12 -k build.keychain -P "$MAC_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KC_PW" build.keychain
+          security list-keychains -d user -s build.keychain login.keychain
+          IDENTITY="$(security find-identity -v -p codesigning build.keychain | grep 'Developer ID Application' | head -1 | sed -E 's/.*"(.*)".*/\1/')"
+          echo "Signing as: $IDENTITY"
+          APP=dist/yt-tray.app
+          find "$APP" -type f | while read -r f; do
+            if file "$f" | grep -q "Mach-O"; then
+              codesign --force --timestamp --options runtime --entitlements packaging/entitlements.plist --sign "$IDENTITY" "$f"
+            fi
+          done
+          codesign --force --timestamp --options runtime --entitlements packaging/entitlements.plist --sign "$IDENTITY" "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          echo "IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+      - name: Notarize
+        if: env.MAC_CERT_P12 != ''
+        run: |
+          ditto -c -k --keepParent dist/yt-tray.app notarize.zip
+          xcrun notarytool submit notarize.zip --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait --output-format json > nota.json
+          cat nota.json
+          if [ "$(jq -r .status nota.json)" != "Accepted" ]; then
+            xcrun notarytool log "$(jq -r .id nota.json)" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+            exit 1
+          fi
+          xcrun stapler staple dist/yt-tray.app
+          xcrun stapler validate dist/yt-tray.app
+          spctl -a -vv dist/yt-tray.app
+      - name: Disk image
+        run: |
+          hdiutil create -volname yt-tray -srcfolder dist/yt-tray.app -ov -format UDZO yt-tray-macos-arm64.dmg
+          if [ -n "$IDENTITY" ]; then codesign --force --timestamp --sign "$IDENTITY" yt-tray-macos-arm64.dmg; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: yt-tray-macos-arm64.dmg
+
+  release:
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="$GITHUB_REF_NAME"
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes || true
+            gh release create "$TAG" artifacts/* --repo "$GITHUB_REPOSITORY" --title "yt-tray $TAG" --notes "Release $TAG"
+          else
+            gh release delete latest --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+            gh release create latest artifacts/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "yt-tray latest build" --notes "Automatic build of the latest commit on main: $MESSAGE"
+          fi

@@ -18,6 +18,10 @@ yt-dlp resolves the raw audio stream and mpv plays it, so no ad is ever requeste
 
 Open the Spotify menu, choose Load Playlist, and paste a public playlist link, for example https://open.spotify.com/playlist/6ZYVuIwQDiHbKIWf0LHTbz. Loaded playlists appear in the menu and can be removed from the Remove submenu. Nothing plays from Spotify: tracks are read from the playlist's public page and each one is matched to a YouTube video by artist, title and length, then played and prefetched like any other playlist. Spotify only exposes the first 100 tracks of a playlist this way, and private playlists cannot be loaded.
 
+## Download
+
+Ready to run builds for Mac (.dmg), Windows (.zip) and Linux (.AppImage) are on the latest release page: https://github.com/JustinOros/yt-tray/releases/tag/latest. They are rebuilt automatically on every push to main. No Python needed. On first launch the app downloads yt-dlp and Deno into its settings folder and keeps yt-dlp up to date. Turn on Start at login in the tray menu to launch it automatically. On GNOME the AppIndicator extension is still needed to show tray icons.
+
 ## Discord presence
 
 Friends see what you are playing, like a Spotify status, with the song title, a progress bar, the thumbnail and a Listen on YouTube button. It clears when you pause.

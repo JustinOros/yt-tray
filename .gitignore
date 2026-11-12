@@ -4,3 +4,9 @@ __pycache__/
 state.json
 yt-tray.log
 *.dll
+dist/
+build/
+packaging/icon.png
+packaging/icon.ico
+packaging/icon.icns
+*.spec.bak

@@ -116,13 +116,96 @@ class Store:
                 log.exception("could not save state")
 
 
+FROZEN = bool(getattr(sys, "frozen", False))
+
+
+def bundle_dir():
+    return Path(getattr(sys, "_MEIPASS", None) or Path(__file__).resolve().parent)
+
+
+def tools_dir():
+    path = config_dir() / "bin"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def tool_path(name):
+    return tools_dir() / (name + (".exe" if sys.platform == "win32" else ""))
+
+
+def self_cmd():
+    if FROZEN:
+        return [sys.executable]
+    return [sys.executable, str(Path(__file__).resolve())]
+
+
+def machine_arch():
+    import platform
+
+    return "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
+
+
+def download_file(url, dest):
+    req = urllib.request.Request(url, headers={"User-Agent": APP})
+    tmp = Path(str(dest) + ".part")
+    with urllib.request.urlopen(req, timeout=120) as resp, open(tmp, "wb") as out:
+        while True:
+            chunk = resp.read(1 << 16)
+            if not chunk:
+                break
+            out.write(chunk)
+    os.replace(tmp, dest)
+    if sys.platform != "win32":
+        os.chmod(dest, 0o755)
+
+
+def ensure_tools():
+    arch = machine_arch()
+    ytdlp = tool_path("yt-dlp")
+    if not ytdlp.exists():
+        if sys.platform == "win32":
+            asset = "yt-dlp.exe"
+        elif sys.platform == "darwin":
+            asset = "yt-dlp_macos"
+        else:
+            asset = "yt-dlp_linux_aarch64" if arch == "arm64" else "yt-dlp_linux"
+        try:
+            log.info("downloading yt-dlp")
+            download_file(f"https://github.com/yt-dlp/yt-dlp/releases/latest/download/{asset}", ytdlp)
+        except Exception:
+            log.exception("yt-dlp download failed")
+    deno = tool_path("deno")
+    if not deno.exists():
+        if sys.platform == "win32":
+            triple = "x86_64-pc-windows-msvc"
+        elif sys.platform == "darwin":
+            triple = "aarch64-apple-darwin" if arch == "arm64" else "x86_64-apple-darwin"
+        else:
+            triple = "aarch64-unknown-linux-gnu" if arch == "arm64" else "x86_64-unknown-linux-gnu"
+        try:
+            import tempfile
+            import zipfile
+
+            log.info("downloading deno")
+            archive = Path(tempfile.mkdtemp()) / "deno.zip"
+            download_file(f"https://github.com/denoland/deno/releases/latest/download/deno-{triple}.zip", archive)
+            with zipfile.ZipFile(archive) as z:
+                member = next(n for n in z.namelist() if Path(n).name.lower() in ("deno", "deno.exe"))
+                with z.open(member) as src, open(deno, "wb") as out:
+                    out.write(src.read())
+            if sys.platform != "win32":
+                os.chmod(deno, 0o755)
+        except Exception:
+            log.exception("deno download failed")
+
+
 class YtdlpError(Exception):
     pass
 
 
 def ytdlp_env():
     env = dict(os.environ)
-    bindir = str(Path(sys.executable).resolve().parent)
+    bindir = str(tools_dir()) if FROZEN else str(Path(sys.executable).resolve().parent)
     env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
     env["PYTHONIOENCODING"] = "utf-8"
     return env
@@ -194,10 +277,8 @@ def adopt_browser(name):
 
 
 def run_ytdlp(args, timeout, browser=""):
-    cmd = [
-        sys.executable,
-        "-m",
-        "yt_dlp",
+    base = [str(tool_path("yt-dlp"))] if FROZEN else [sys.executable, "-m", "yt_dlp"]
+    cmd = base + [
         "--ignore-config",
         "--no-warnings",
         "--socket-timeout",
@@ -270,6 +351,24 @@ def ytdlp_json(args, timeout=120):
 
 def update_ytdlp():
     log.info("updating yt-dlp")
+    if FROZEN:
+        ensure_tools()
+        try:
+            proc = subprocess.run(
+                [str(tool_path("yt-dlp")), "-U"],
+                capture_output=True,
+                text=True,
+                timeout=600,
+                env=ytdlp_env(),
+                **subprocess_flags(),
+            )
+        except Exception:
+            log.exception("yt-dlp update failed")
+            return False
+        if proc.returncode != 0:
+            log.warning("yt-dlp update failed: %s", (proc.stderr or proc.stdout or "").strip()[-300:])
+            return False
+        return True
     cmd = [
         sys.executable,
         "-m",
@@ -586,8 +685,18 @@ def find_youtube_for(query, duration=None):
 def prepare_libmpv():
     import ctypes.util
 
+    if FROZEN and sys.platform != "win32":
+        found = None
+        for pattern in ("libmpv*.dylib", "libmpv.so*"):
+            found = found or next(iter(sorted(bundle_dir().rglob(pattern))), None)
+        if found is not None:
+            original = ctypes.util.find_library
+            ctypes.util.find_library = (
+                lambda name, _c=str(found), _o=original: _c if name == "mpv" else _o(name)
+            )
+            return
     if sys.platform == "win32":
-        here = str(Path(__file__).resolve().parent)
+        here = str(bundle_dir() if FROZEN else Path(__file__).resolve().parent)
         dirs = [here] + [d for d in os.environ.get("YT_TRAY_MPV_DIR", "").split(os.pathsep) if d]
         for d in dirs:
             if os.path.isdir(d):
@@ -1176,7 +1285,7 @@ def hide_dock_icon(activate=False):
         log.exception("hide dock icon failed")
 
 
-def dialog_main(initial, prompt="Search YouTube playlists:", button="Play"):
+def dialog_main(initial, prompt="Search YouTube playlists:", button="Play", out=None):
     import tkinter as tk
 
     dark = False
@@ -1260,6 +1369,9 @@ def dialog_main(initial, prompt="Search YouTube playlists:", button="Play"):
     root.attributes("-topmost", True)
     root.after(50, lambda: (root.focus_force(), entry.focus_force()))
     root.mainloop()
+    if out:
+        Path(out).write_text(result["value"], encoding="utf-8")
+        return
     sys.stdout.write(result["value"])
     sys.stdout.flush()
 
@@ -1422,13 +1534,16 @@ def ask_query_mac(initial, prompt, button):
 def ask_query(initial="", prompt="Search YouTube playlists:", button="Play"):
     if sys.platform == "darwin":
         return ask_query_mac(initial, prompt, button)
-    cmd = [
-        sys.executable,
-        str(Path(__file__).resolve()),
+    import tempfile
+
+    fd, out_path = tempfile.mkstemp(prefix="yt-tray-", suffix=".txt")
+    os.close(fd)
+    cmd = self_cmd() + [
         "--dialog",
         f"--text={initial}",
         f"--prompt={prompt}",
         f"--button={button}",
+        f"--out={out_path}",
     ]
     try:
         proc = subprocess.run(
@@ -1443,10 +1558,18 @@ def ask_query(initial="", prompt="Search YouTube playlists:", button="Play"):
     except Exception:
         log.exception("search dialog failed")
         return ""
+    try:
+        text = Path(out_path).read_text(encoding="utf-8").strip()
+    except OSError:
+        text = ""
+    try:
+        os.unlink(out_path)
+    except OSError:
+        pass
     if proc.returncode != 0:
         log.warning("search dialog error: %s", (proc.stderr or "").strip()[-300:])
         return ""
-    return proc.stdout.strip()
+    return text
 
 
 ICON_COLORS = {
@@ -2474,7 +2597,7 @@ class App:
         if sys.platform == "win32":
             self.enable_dark_menus()
         self.icon = None
-        if sys.platform.startswith("linux") and pystray.Icon.__module__.endswith("_appindicator"):
+        if sys.platform.startswith("linux"):
             try:
                 self.icon = SniIcon(
                     APP, self.images[(theme, "idle", 0)], APP, self.build_menu(), self.on_toggle
@@ -2542,6 +2665,11 @@ class App:
                         radio=True,
                     ),
                 ),
+            ),
+            ps.MenuItem(
+                "Start at login",
+                self.on_login_item,
+                checked=lambda item: service_installed(),
             ),
             ps.MenuItem(
                 "Discord presence",
@@ -2660,6 +2788,16 @@ class App:
         self.show_popup(video_id, title)
         self.discord.set_track(video_id, title, self.ctl.last_dur)
 
+    def on_login_item(self, icon=None, item=None):
+        try:
+            if service_installed():
+                service_remove()
+            else:
+                service_install()
+        except Exception:
+            log.exception("start at login change failed")
+        self.refresh()
+
     def on_discord(self, icon=None, item=None):
         threading.Thread(target=self.toggle_discord, daemon=True).start()
 
@@ -2693,9 +2831,7 @@ class App:
             return
         if self.popup_proc is not None and self.popup_proc.poll() is None:
             self.popup_proc.terminate()
-        cmd = [
-            sys.executable,
-            str(Path(__file__).resolve()),
+        cmd = self_cmd() + [
             "--popup",
             f"--text={title}",
             f"--thumb-url=https://i.ytimg.com/vi/{video_id}/mqdefault.jpg",
@@ -3386,6 +3522,13 @@ def wait_for_taskbar(timeout=120):
         log.exception("taskbar wait failed")
 
 
+def service_args():
+    if FROZEN:
+        return [os.environ.get("APPIMAGE") or sys.executable]
+    py, script = service_command()
+    return [py, script]
+
+
 def service_command():
     py = venv_python() if venv_python().exists() else Path(sys.executable)
     if sys.platform == "win32" and py.name.lower() == "python.exe":
@@ -3395,8 +3538,31 @@ def service_command():
     return str(py), str(Path(__file__).resolve())
 
 
+def service_quoted(args):
+    return " ".join('"' + a + '"' for a in args)
+
+
+def service_installed():
+    if sys.platform == "win32":
+        try:
+            import winreg
+
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run"
+            )
+            winreg.QueryValueEx(key, APP)
+            winreg.CloseKey(key)
+            return True
+        except OSError:
+            return False
+    if sys.platform == "darwin":
+        return (Path.home() / "Library" / "LaunchAgents" / f"{SERVICE_LABEL}.plist").exists()
+    base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    return (base / "autostart" / f"{APP}.desktop").exists()
+
+
 def service_install():
-    py, script = service_command()
+    args = service_args()
     if sys.platform == "win32":
         import winreg
 
@@ -3406,7 +3572,7 @@ def service_install():
             0,
             winreg.KEY_SET_VALUE,
         )
-        winreg.SetValueEx(key, APP, 0, winreg.REG_SZ, f'"{py}" "{script}" --startup')
+        winreg.SetValueEx(key, APP, 0, winreg.REG_SZ, service_quoted(args) + " --startup")
         winreg.CloseKey(key)
         print("installed: starts at login")
     elif sys.platform == "darwin":
@@ -3416,7 +3582,7 @@ def service_install():
         path.parent.mkdir(parents=True, exist_ok=True)
         plist = {
             "Label": SERVICE_LABEL,
-            "ProgramArguments": [py, script],
+            "ProgramArguments": args,
             "RunAtLoad": True,
             "EnvironmentVariables": {
                 "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
@@ -3434,7 +3600,7 @@ def service_install():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             "[Desktop Entry]\nType=Application\nName=yt-tray\n"
-            f'Exec="{py}" "{script}"\nX-GNOME-Autostart-enabled=true\n',
+            f"Exec={service_quoted(args)}\nX-GNOME-Autostart-enabled=true\n",
             encoding="utf-8",
         )
         print("installed:", path)
@@ -3470,6 +3636,7 @@ def service_remove():
 def main():
     parser = argparse.ArgumentParser(prog=APP)
     parser.add_argument("--dialog", action="store_true")
+    parser.add_argument("--out", default="")
     parser.add_argument("--text", default="")
     parser.add_argument("--popup", action="store_true")
     parser.add_argument("--prompt", default="Search YouTube playlists:")
@@ -3491,7 +3658,7 @@ def main():
         print(VERSION)
         return 0
     if args.dialog:
-        dialog_main(args.text, args.prompt, args.button)
+        dialog_main(args.text, args.prompt, args.button, args.out or None)
         return 0
     if args.popup:
         popup_main(args.text, args.thumb_url, args.seconds)
@@ -3511,7 +3678,10 @@ def main():
         return 0
     if args.restart:
         print("stopped old instance" if stop_running() else "no running instance, starting")
-    if os.environ.get("YT_TRAY_NO_BOOTSTRAP") != "1":
+    if FROZEN:
+        if args.setup:
+            return 0
+    elif os.environ.get("YT_TRAY_NO_BOOTSTRAP") != "1":
         bootstrap(args.setup)
     elif args.setup:
         return 0
@@ -3532,6 +3702,8 @@ def main():
     try:
         if args.startup and sys.platform == "win32":
             wait_for_taskbar()
+        if FROZEN:
+            ensure_tools()
         app = App()
         app.startup = bool(args.startup)
         threading.Thread(target=control_loop, args=(lock, app), daemon=True).start()
