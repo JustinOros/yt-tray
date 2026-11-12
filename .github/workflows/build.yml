@@ -147,10 +147,15 @@ jobs:
           spctl -a -vv dist/yt-tray.app
       - name: Disk image
         run: |
+          brew install create-dmg
           mkdir dmgroot
           cp -R dist/yt-tray.app dmgroot/
-          ln -s /Applications dmgroot/Applications
-          hdiutil create -volname yt-tray -srcfolder dmgroot -ov -format UDZO yt-tray-macos-arm64.dmg
+          rm -f yt-tray-macos-arm64.dmg
+          create-dmg --volname yt-tray --window-pos 200 120 --window-size 540 360 --icon-size 100 --icon yt-tray.app 140 170 --hide-extension yt-tray.app --app-drop-link 400 170 yt-tray-macos-arm64.dmg dmgroot || {
+            rm -f yt-tray-macos-arm64.dmg
+            ln -s /Applications dmgroot/Applications
+            hdiutil create -volname yt-tray -srcfolder dmgroot -ov -format UDZO yt-tray-macos-arm64.dmg
+          }
           if [ -n "$IDENTITY" ]; then codesign --force --timestamp --sign "$IDENTITY" yt-tray-macos-arm64.dmg; fi
       - uses: actions/upload-artifact@v4
         with:
