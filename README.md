@@ -8,7 +8,7 @@ yt-dlp resolves the raw audio stream and mpv plays it, so no ad is ever requeste
 
 - Tray icon toggles Play/Pause on left-click (middle-click on GNOME), and the icon shows the state (grey idle, blue loading, green playing, amber paused)
 - First Play with nothing queued opens a small search box
-- Right-click menu: Play/Pause, Search, Next, Previous, Now Playing (current title), Shuffle toggle, Quit
+- Right-click menu: Play/Pause, Search, Next, Previous, Now Playing (current title), Shuffle toggle, Discord presence, Quit
 - Search finds a YouTube playlist from your text and starts playing it, shuffled or in order
 - Recovers on its own from stalls, errors and expired stream URLs by re-resolving and resuming at the same position
 - Remembers the last playlist, track and position between launches
@@ -17,6 +17,16 @@ yt-dlp resolves the raw audio stream and mpv plays it, so no ad is ever requeste
 ## Spotify playlists
 
 Open the Spotify menu, choose Load Playlist, and paste a public playlist link, for example https://open.spotify.com/playlist/6ZYVuIwQDiHbKIWf0LHTbz. Loaded playlists appear in the menu and can be removed from the Remove submenu. Nothing plays from Spotify: tracks are read from the playlist's public page and each one is matched to a YouTube video by artist, title and length, then played and prefetched like any other playlist. Spotify only exposes the first 100 tracks of a playlist this way, and private playlists cannot be loaded.
+
+## Discord presence
+
+Friends see what you are playing, like a Spotify status, with the song title, a progress bar, the thumbnail and a Listen on YouTube button. It clears when you pause.
+
+1. Open https://discord.com/developers/applications and choose New Application. The name you give it is what friends see after "Listening to", for example yt-tray.
+2. Copy the Application ID from the General Information page.
+3. Run `python3 yt-tray.py --discord-id YOUR_APPLICATION_ID` and then `python3 yt-tray.py --restart`, or turn on Discord presence in the tray menu and paste the ID when asked.
+
+The Discord desktop app must be running on the same computer, and Settings, Activity Privacy, Share your detected activity must be on. Turn it off any time from the same menu item.
 
 ## Quick start
 

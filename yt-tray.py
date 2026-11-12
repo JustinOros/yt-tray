@@ -68,6 +68,8 @@ DEFAULT_STATE = {
     "notifications": True,
     "pin_icon": True,
     "cookies_browser": "",
+    "discord": False,
+    "discord_id": "",
     "spotify": [],
     "orig": [],
     "order": [],
@@ -2309,6 +2311,130 @@ class MediaKeys:
         GLib.idle_add(emit)
 
 
+class DiscordPresence:
+    def __init__(self, enabled, client_id, position, playlist):
+        self.enabled = enabled
+        self.client_id = client_id
+        self.position = position
+        self.playlist = playlist
+        self.track = None
+        self.status = "idle"
+        self.rpc = None
+        self.pushed = None
+        self.failed_at = 0.0
+        self.wake = threading.Event()
+        self.stop_flag = threading.Event()
+        threading.Thread(target=self.loop, daemon=True).start()
+
+    def set_track(self, video_id, title, duration):
+        self.track = {"id": video_id, "title": title, "duration": duration}
+        self.pushed = None
+        self.wake.set()
+
+    def set_status(self, status):
+        if status != self.status:
+            self.status = status
+            self.wake.set()
+
+    def poke(self):
+        self.wake.set()
+
+    def stop(self):
+        self.stop_flag.set()
+        self.wake.set()
+        self.drop()
+
+    def loop(self):
+        while not self.stop_flag.is_set():
+            woke = self.wake.wait(20)
+            self.wake.clear()
+            if self.stop_flag.is_set():
+                return
+            if woke:
+                time.sleep(1.0)
+            try:
+                self.apply()
+            except Exception:
+                log.exception("discord presence failed")
+                self.drop()
+
+    def drop(self):
+        rpc = self.rpc
+        self.rpc = None
+        self.pushed = None
+        if rpc is None:
+            return
+        try:
+            rpc.clear()
+        except Exception:
+            pass
+        try:
+            rpc.close()
+        except Exception:
+            pass
+
+    def apply(self):
+        client_id = (self.client_id() or "").strip()
+        want = bool(
+            self.enabled() and client_id and self.status == "playing" and self.track
+        )
+        if not want:
+            self.drop()
+            return
+        track = self.track
+        key = (track["id"], track["title"])
+        if self.rpc is not None and self.pushed == key:
+            return
+        if self.rpc is None:
+            if time.time() - self.failed_at < 30:
+                return
+            from pypresence import Presence
+
+            rpc = Presence(client_id)
+            try:
+                rpc.connect()
+            except Exception as exc:
+                log.info("discord not available: %s", exc)
+                self.failed_at = time.time()
+                return
+            self.rpc = rpc
+        title = (track["title"] or APP).strip()
+        if len(title) < 2:
+            title = title + " "
+        title = title[:120]
+        start = int(time.time() - float(self.position() or 0))
+        state = (self.playlist() or APP).strip()[:120]
+        if len(state) < 2:
+            state = APP
+        video_id = track["id"] or ""
+        fields = {
+            "details": title,
+            "state": state,
+            "start": start,
+            "large_text": title,
+        }
+        if track.get("duration"):
+            fields["end"] = start + int(track["duration"])
+        if re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+            fields["large_image"] = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+            fields["buttons"] = [
+                {"label": "Listen on YouTube", "url": f"https://www.youtube.com/watch?v={video_id}"}
+            ]
+        try:
+            from pypresence import ActivityType, StatusDisplayType
+
+            self.rpc.update(
+                activity_type=ActivityType.LISTENING,
+                status_display_type=StatusDisplayType.DETAILS,
+                **fields,
+            )
+        except ImportError:
+            self.rpc.update(**fields)
+        except TypeError:
+            self.rpc.update(**fields)
+        self.pushed = key
+
+
 class App:
     def __init__(self):
         import pystray
@@ -2320,6 +2446,12 @@ class App:
         self.frame = 0
         self.system_dark = detect_system_dark()
         self.player = make_player()
+        self.discord = DiscordPresence(
+            lambda: self.store.data.get("discord"),
+            lambda: self.store.data.get("discord_id"),
+            lambda: self.ctl.last_pos,
+            lambda: self.store.data.get("playlist_title"),
+        )
         self.media = MediaKeys(
             self.on_toggle,
             lambda: (self.ctl.status, self.ctl.now_title()),
@@ -2332,7 +2464,7 @@ class App:
             on_change=self.refresh,
             on_notify=self.notify,
             ask_search=self.open_search,
-            on_track=self.show_popup,
+            on_track=self.on_track_started,
         )
         self.popup_proc = None
         COOKIES["browser"] = self.store.data.get("cookies_browser", "") or ""
@@ -2410,6 +2542,11 @@ class App:
                         radio=True,
                     ),
                 ),
+            ),
+            ps.MenuItem(
+                "Discord presence",
+                self.on_discord,
+                checked=lambda item: bool(self.store.data.get("discord")),
             ),
             ps.MenuItem(
                 "Always show icon",
@@ -2519,6 +2656,38 @@ class App:
         self.refresh()
         self.notify(f"Added {name} ({len(entries)} tracks)")
 
+    def on_track_started(self, video_id, title):
+        self.show_popup(video_id, title)
+        self.discord.set_track(video_id, title, self.ctl.last_dur)
+
+    def on_discord(self, icon=None, item=None):
+        threading.Thread(target=self.toggle_discord, daemon=True).start()
+
+    def toggle_discord(self):
+        data = self.store.data
+        if data.get("discord"):
+            data["discord"] = False
+            self.store.save()
+            self.discord.poke()
+            self.refresh()
+            return
+        if not re.fullmatch(r"\d{17,20}", str(data.get("discord_id") or "")):
+            if not self.dialog_lock.acquire(blocking=False):
+                return
+            try:
+                text = ask_query(data.get("discord_id") or "", "Discord application ID:", "Save")
+            finally:
+                self.dialog_lock.release()
+            text = (text or "").strip()
+            if not re.fullmatch(r"\d{17,20}", text):
+                log.info("discord application ID not saved")
+                return
+            data["discord_id"] = text
+        data["discord"] = True
+        self.store.save()
+        self.discord.poke()
+        self.refresh()
+
     def show_popup(self, video_id, title):
         if not self.store.data.get("notifications", True):
             return
@@ -2626,6 +2795,7 @@ class App:
             self.icon.title = self.tooltip()
             self.icon.update_menu()
             self.media.update()
+            self.discord.set_status(status)
         except Exception:
             log.exception("icon refresh failed")
 
@@ -2701,6 +2871,7 @@ class App:
         self.ctl.set_shuffle(not self.ctl.shuffle)
 
     def on_quit(self, icon=None, item=None):
+        self.discord.stop()
         self.ctl.shutdown()
         self.icon.stop()
 
@@ -2893,6 +3064,7 @@ PIP_DEPS = {
     "pystray": "pystray>=0.19.5",
     "PIL": "Pillow>=10.0",
     "truststore": "truststore>=0.9",
+    "pypresence": "pypresence>=4.3",
 }
 if sys.platform == "darwin":
     PIP_DEPS["MediaPlayer"] = "pyobjc-framework-MediaPlayer"
@@ -3311,6 +3483,7 @@ def main():
     parser.add_argument("--stop", action="store_true")
     parser.add_argument("--restart", action="store_true")
     parser.add_argument("--startup", action="store_true")
+    parser.add_argument("--discord-id", metavar="APP_ID")
     parser.add_argument("--install-service", action="store_true")
     parser.add_argument("--remove-service", action="store_true")
     args = parser.parse_args()
@@ -3322,6 +3495,16 @@ def main():
         return 0
     if args.popup:
         popup_main(args.text, args.thumb_url, args.seconds)
+        return 0
+    if args.discord_id:
+        if not re.fullmatch(r"\d{17,20}", args.discord_id.strip()):
+            print("that does not look like a Discord application ID")
+            return 1
+        store = Store()
+        store.data["discord_id"] = args.discord_id.strip()
+        store.data["discord"] = True
+        store.save()
+        print("discord presence on, apply it with: python3 yt-tray.py --restart")
         return 0
     if args.stop:
         print("stopped" if stop_running() else "not running")
