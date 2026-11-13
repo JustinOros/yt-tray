@@ -1291,7 +1291,7 @@ def hide_dock_icon(activate=False):
         log.exception("hide dock icon failed")
 
 
-def dialog_main(initial, prompt="Search YouTube playlists:", button="Play", out=None):
+def dialog_main(initial, prompt="Search YouTube playlists:", button="Play", out=None, link=""):
     import tkinter as tk
 
     dark = False
@@ -1325,6 +1325,20 @@ def dialog_main(initial, prompt="Search YouTube playlists:", button="Play", out=
         )
     label.pack(padx=14, pady=(14, 4), anchor="w")
     entry.pack(padx=14, pady=4, ipady=2)
+    if link:
+        import webbrowser
+
+        link_label = tk.Label(
+            root,
+            text=link,
+            fg="#4da3ff" if dark else "#0a64ad",
+            cursor="hand2",
+            font=("TkDefaultFont", 10, "underline"),
+        )
+        if dark:
+            link_label.configure(bg=bg)
+        link_label.pack(padx=14, pady=(2, 0), anchor="w")
+        link_label.bind("<Button-1>", lambda _e: webbrowser.open(link))
     entry.select_range(0, "end")
 
     def accept(_event=None):
@@ -1519,27 +1533,43 @@ def popup_main(title, thumb_url, seconds):
     root.mainloop()
 
 
-def ask_query_mac(initial, prompt, button):
-    script = (
-        f"text returned of (display dialog {json.dumps(prompt)} "
-        f"default answer {json.dumps(initial)} with title \"yt-tray\" "
-        f"buttons {{\"Cancel\", {json.dumps(button)}}} default button {json.dumps(button)})"
-    )
-    try:
-        proc = subprocess.run(
-            ["osascript", "-e", script], capture_output=True, text=True, timeout=3600
+def ask_query_mac(initial, prompt, button, link=""):
+    link_button = "Open Discord Page"
+    text = initial
+    while True:
+        buttons = (
+            f"{{\"Cancel\", {json.dumps(link_button)}, {json.dumps(button)}}}"
+            if link
+            else f"{{\"Cancel\", {json.dumps(button)}}}"
         )
-    except Exception:
-        log.exception("search dialog failed")
-        return ""
-    if proc.returncode != 0:
-        return ""
-    return proc.stdout.strip()
+        script = (
+            f"set r to display dialog {json.dumps(prompt)} "
+            f"default answer {json.dumps(text)} with title \"yt-tray\" "
+            f"buttons {buttons} default button {json.dumps(button)}\n"
+            "return (button returned of r) & linefeed & (text returned of r)"
+        )
+        try:
+            proc = subprocess.run(
+                ["osascript", "-e", script], capture_output=True, text=True, timeout=3600
+            )
+        except Exception:
+            log.exception("search dialog failed")
+            return ""
+        if proc.returncode != 0:
+            return ""
+        pressed, _, text = proc.stdout.rstrip("\n").partition("\n")
+        if link and pressed == link_button:
+            try:
+                subprocess.Popen(["open", link])
+            except Exception:
+                log.exception("open link failed")
+            continue
+        return text.strip()
 
 
-def ask_query(initial="", prompt="Search YouTube playlists:", button="Play"):
+def ask_query(initial="", prompt="Search YouTube playlists:", button="Play", link=""):
     if sys.platform == "darwin":
-        return ask_query_mac(initial, prompt, button)
+        return ask_query_mac(initial, prompt, button, link)
     import tempfile
 
     fd, out_path = tempfile.mkstemp(prefix="yt-tray-", suffix=".txt")
@@ -1550,6 +1580,7 @@ def ask_query(initial="", prompt="Search YouTube playlists:", button="Play"):
         f"--prompt={prompt}",
         f"--button={button}",
         f"--out={out_path}",
+        f"--link={link}",
     ]
     try:
         proc = subprocess.run(
@@ -2819,7 +2850,12 @@ class App:
             if not self.dialog_lock.acquire(blocking=False):
                 return
             try:
-                text = ask_query(data.get("discord_id") or "", "Discord application ID:", "Save")
+                text = ask_query(
+                    data.get("discord_id") or "",
+                    "Discord application ID (create an app at discord.com/developers/applications):",
+                    "Save",
+                    "https://discord.com/developers/applications",
+                )
             finally:
                 self.dialog_lock.release()
             text = (text or "").strip()
@@ -3647,6 +3683,7 @@ def main():
     parser.add_argument("--popup", action="store_true")
     parser.add_argument("--prompt", default="Search YouTube playlists:")
     parser.add_argument("--button", default="Play")
+    parser.add_argument("--link", default="")
     parser.add_argument("--thumb-url", default="")
     parser.add_argument("--seconds", type=float, default=4.0)
     parser.add_argument("--selftest", metavar="QUERY")
@@ -3664,7 +3701,7 @@ def main():
         print(VERSION)
         return 0
     if args.dialog:
-        dialog_main(args.text, args.prompt, args.button, args.out or None)
+        dialog_main(args.text, args.prompt, args.button, args.out or None, args.link)
         return 0
     if args.popup:
         setup_tls()
