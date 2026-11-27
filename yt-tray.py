@@ -66,6 +66,7 @@ DEFAULT_STATE = {
     "shuffle": True,
     "theme": "auto",
     "notifications": True,
+    "popup_pos": "auto",
     "pin_icon": True,
     "cookies_browser": "",
     "discord": False,
@@ -926,7 +927,15 @@ class Controller:
         if leaving and self.cur is not None:
             with self.cache_lock:
                 self.cache[leaving["id"]] = self.cur
-        self.data["index"] = (self.data["index"] + delta) % len(order)
+        target = self.data["index"] + delta
+        if delta > 0 and target >= len(order) and self.data["shuffle"] and len(order) > 1:
+            last = order[-1]
+            random.shuffle(order)
+            if order[0] == last:
+                swap = random.randrange(1, len(order))
+                order[0], order[swap] = order[swap], order[0]
+            target = 0
+        self.data["index"] = target % len(order)
         self.data["position"] = 0.0
         self.start_track(self.data["index"], 0.0, True)
 
@@ -1396,7 +1405,41 @@ def dialog_main(initial, prompt="Search YouTube playlists:", button="Play", out=
     sys.stdout.flush()
 
 
-def popup_main_mac(title, thumb_url, seconds):
+POPUP_POSITIONS = (
+    ("auto", "Auto"),
+    ("top-right", "Top Right"),
+    ("top-left", "Top Left"),
+    ("bottom-right", "Bottom Right"),
+    ("bottom-left", "Bottom Left"),
+)
+
+
+def windows_work_area():
+    import ctypes
+    from ctypes import wintypes
+
+    rect = wintypes.RECT()
+    ctypes.windll.user32.SystemParametersInfoW(48, 0, ctypes.byref(rect), 0)
+    return rect.left, rect.top, rect.right, rect.bottom
+
+
+def popup_corner(position, work=None, screen=None):
+    if position in ("top-right", "top-left", "bottom-right", "bottom-left"):
+        vert, horz = position.split("-")
+        return vert, horz
+    vert, horz = "bottom", "right"
+    if sys.platform == "darwin":
+        vert = "top"
+    elif sys.platform == "win32" and work and screen:
+        left, top, right, bottom = work
+        if top > 0:
+            vert = "top"
+        if left > 0:
+            horz = "left"
+    return vert, horz
+
+
+def popup_main_mac(title, thumb_url, seconds, position="auto"):
     import AppKit
     import Foundation
     from PyObjCTools import AppHelper
@@ -1412,8 +1455,15 @@ def popup_main_mac(title, thumb_url, seconds):
         data = None
     width, height = 372, 96
     frame = AppKit.NSScreen.mainScreen().visibleFrame()
-    x = frame.origin.x + frame.size.width - width - 20
-    y = frame.origin.y + frame.size.height - height - 12
+    vert, horz = popup_corner(position)
+    if horz == "left":
+        x = frame.origin.x + 20
+    else:
+        x = frame.origin.x + frame.size.width - width - 20
+    if vert == "top":
+        y = frame.origin.y + frame.size.height - height - 12
+    else:
+        y = frame.origin.y + 12
     win = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
         Foundation.NSMakeRect(x, y, width, height),
         AppKit.NSWindowStyleMaskBorderless,
@@ -1465,9 +1515,9 @@ def popup_main_mac(title, thumb_url, seconds):
     app.run()
 
 
-def popup_main(title, thumb_url, seconds):
+def popup_main(title, thumb_url, seconds, position="auto"):
     if sys.platform == "darwin":
-        popup_main_mac(title, thumb_url, seconds)
+        popup_main_mac(title, thumb_url, seconds, position)
         return
     import base64
     import io
@@ -1520,8 +1570,21 @@ def popup_main(title, thumb_url, seconds):
     ).pack(fill="both", expand=True)
     root.update_idletasks()
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-    x = sw - width - 20
-    y = 40 if sys.platform == "darwin" else sh - height - 70
+    work = (0, 0, sw, sh)
+    if sys.platform == "win32":
+        try:
+            work = windows_work_area()
+        except Exception:
+            work = (0, 0, sw, sh)
+    vert, horz = popup_corner(position, work, (sw, sh))
+    if horz == "left":
+        x = work[0] + 20
+    else:
+        x = work[2] - width - 20
+    if sys.platform == "win32":
+        y = work[1] + 20 if vert == "top" else work[3] - height - 20
+    else:
+        y = 40 if vert == "top" else sh - height - 70
     root.geometry(f"{width}x{height}+{x}+{y}")
     if sys.platform != "darwin":
         root.deiconify()
@@ -2701,6 +2764,16 @@ class App:
                         checked=lambda item: not self.store.data.get("notifications", True),
                         radio=True,
                     ),
+                    ps.Menu.SEPARATOR,
+                    *[
+                        ps.MenuItem(
+                            label,
+                            self.make_position_action(key),
+                            checked=lambda item, key=key: self.store.data.get("popup_pos", "auto") == key,
+                            radio=True,
+                        )
+                        for key, label in POPUP_POSITIONS
+                    ],
                 ),
             ),
             ps.MenuItem(
@@ -2877,6 +2950,7 @@ class App:
             "--popup",
             f"--text={title}",
             f"--thumb-url=https://i.ytimg.com/vi/{video_id}/mqdefault.jpg",
+            f"--position={self.store.data.get('popup_pos', 'auto')}",
         ]
         try:
             self.popup_proc = subprocess.Popen(
@@ -2939,6 +3013,14 @@ class App:
         def action(icon=None, item=None):
             self.store.data["notifications"] = on
             self.store.save()
+
+        return action
+
+    def make_position_action(self, key):
+        def action(icon=None, item=None):
+            self.store.data["popup_pos"] = key
+            self.store.save()
+            self.refresh()
 
         return action
 
@@ -3685,6 +3767,7 @@ def main():
     parser.add_argument("--button", default="Play")
     parser.add_argument("--link", default="")
     parser.add_argument("--thumb-url", default="")
+    parser.add_argument("--position", default="auto")
     parser.add_argument("--seconds", type=float, default=4.0)
     parser.add_argument("--selftest", metavar="QUERY")
     parser.add_argument("--update", action="store_true")
@@ -3705,7 +3788,7 @@ def main():
         return 0
     if args.popup:
         setup_tls()
-        popup_main(args.text, args.thumb_url, args.seconds)
+        popup_main(args.text, args.thumb_url, args.seconds, args.position)
         return 0
     if args.discord_id:
         if not re.fullmatch(r"\d{17,20}", args.discord_id.strip()):
